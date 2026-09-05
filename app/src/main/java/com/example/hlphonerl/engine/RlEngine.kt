@@ -45,6 +45,13 @@ class RlEngine(private val coin: String = "xyz:SP500") {
     private val _state = MutableStateFlow(EngineUiState(coin = coin))
     val state: StateFlow<EngineUiState> = _state
 
+    fun exportPolicyJson(): String = learner.snapshotJson()
+
+    fun importPolicyJson(json: String) {
+        learner.restoreJson(json)
+        _state.value = _state.value.copy(updates = learner.updates, epsilon = learner.epsilon, status = "policy restored")
+    }
+
     fun start() {
         if (_state.value.running) return
         _state.value = _state.value.copy(status = "starting", running = true)

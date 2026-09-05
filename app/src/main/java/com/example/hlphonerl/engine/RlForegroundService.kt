@@ -16,6 +16,7 @@ class RlForegroundService : Service() {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
     private val engine = AppRuntime.engine
     private var notificationJob: Job? = null
+    private var lastSavedUpdates = -1
 
     override fun onCreate() {
         super.onCreate()
@@ -36,6 +37,7 @@ class RlForegroundService : Service() {
     override fun onBind(intent: Intent?): IBinder? = null
 
     override fun onDestroy() {
+        savePolicy()
         notificationJob?.cancel()
         scope.cancel()
         engine.stop()
@@ -44,10 +46,12 @@ class RlForegroundService : Service() {
 
     private fun startLearner() {
         startForeground(NOTIFICATION_ID, buildNotification("Starting", "Connecting to HyperLiquid L2…"))
+        loadPolicy()
         engine.start()
         notificationJob?.cancel()
         notificationJob = scope.launch {
             engine.state.collect { s ->
+                if (s.updates > 0 && s.updates / 100 > lastSavedUpdates / 100) savePolicy()
                 val title = if (s.running) "HL Phone RL running" else "HL Phone RL paused"
                 val text = "${s.coin} • PnL ${"%+.4f".format(s.equity)} • ${s.action}"
                 val nm = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
@@ -57,10 +61,28 @@ class RlForegroundService : Service() {
     }
 
     private fun stopLearner() {
+        savePolicy()
         notificationJob?.cancel()
         engine.stop()
         stopForeground(STOP_FOREGROUND_REMOVE)
         stopSelf()
+    }
+
+    private fun savePolicy() {
+        try {
+            getSharedPreferences(PREFS, MODE_PRIVATE)
+                .edit()
+                .putString(KEY_POLICY_JSON, engine.exportPolicyJson())
+                .apply()
+            lastSavedUpdates = engine.state.value.updates
+        } catch (_: Exception) {
+            // Best-effort checkpointing; never crash the foreground service while saving.
+        }
+    }
+
+    private fun loadPolicy() {
+        val json = getSharedPreferences(PREFS, MODE_PRIVATE).getString(KEY_POLICY_JSON, null) ?: return
+        try { engine.importPolicyJson(json) } catch (_: Exception) { }
     }
 
     private fun createChannel() {
@@ -101,5 +123,7 @@ class RlForegroundService : Service() {
         const val ACTION_STOP = "com.example.hlphonerl.STOP_LEARNER"
         private const val CHANNEL_ID = "hl_phone_rl_learner"
         private const val NOTIFICATION_ID = 42
+        private const val PREFS = "hl_phone_rl_policy"
+        private const val KEY_POLICY_JSON = "linear_double_q_policy_json"
     }
 }

@@ -1,6 +1,8 @@
 package com.example.hlphonerl.rl
 
 import com.example.hlphonerl.data.Action
+import org.json.JSONArray
+import org.json.JSONObject
 import kotlin.math.max
 import kotlin.random.Random
 
@@ -50,6 +52,39 @@ class MaskedDoubleQLearner(
 
     fun qValues(state: FloatArray): DoubleArray = DoubleArray(actions) { a ->
         (dot(wA[a], state) + dot(wB[a], state)) / 2.0
+    }
+
+    fun snapshotJson(): String {
+        fun matrixJson(m: Array<DoubleArray>) = JSONArray().also { outer ->
+            m.forEach { row -> outer.put(JSONArray().also { inner -> row.forEach { inner.put(it) } }) }
+        }
+        return JSONObject()
+            .put("format", "hl-phone-rl-linear-double-q-v1")
+            .put("inputDim", inputDim)
+            .put("actions", actions)
+            .put("epsilon", epsilon)
+            .put("updates", updates)
+            .put("wA", matrixJson(wA))
+            .put("wB", matrixJson(wB))
+            .toString()
+    }
+
+    fun restoreJson(json: String) {
+        val obj = JSONObject(json)
+        require(obj.getString("format") == "hl-phone-rl-linear-double-q-v1")
+        require(obj.getInt("inputDim") == inputDim)
+        require(obj.getInt("actions") == actions)
+        epsilon = obj.getDouble("epsilon")
+        updates = obj.getInt("updates")
+        fun loadMatrix(name: String, target: Array<DoubleArray>) {
+            val outer = obj.getJSONArray(name)
+            for (a in 0 until actions) {
+                val row = outer.getJSONArray(a)
+                for (i in 0 until inputDim + 1) target[a][i] = row.getDouble(i)
+            }
+        }
+        loadMatrix("wA", wA)
+        loadMatrix("wB", wB)
     }
 
     fun train(batch: List<Transition>) {
