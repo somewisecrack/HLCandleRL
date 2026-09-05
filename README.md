@@ -43,6 +43,8 @@ The current app contains:
 - Masked discrete action space.
 - Online replay buffer.
 - Phone-friendly masked Double-Q learner with linear function approximation.
+- Android foreground service for screen-off/background operation.
+- Persistent notification with live PnL/action and a Stop action.
 - Jetpack Compose UI showing:
   - Start / Stop
   - connection status
@@ -295,7 +297,7 @@ Current safety properties:
 
 Near-term:
 
-- Move engine into an Android foreground service.
+- Add battery-aware pause controls.
 - Add stale-book masks for entries.
 - Persist replay in Room SQLite.
 - Persist model checkpoints locally.

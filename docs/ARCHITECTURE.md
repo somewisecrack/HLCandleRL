@@ -4,8 +4,11 @@ HL Phone RL is intentionally split into small layers so the RL learner can evolv
 
 ## Runtime flow
 
+The learner now runs inside `RlForegroundService`, so it can continue while the app is backgrounded or the screen is off, subject to normal Android foreground-service limits.
+
 ```text
-HyperLiquid L2 WebSocket
+Android foreground service
+  → HyperLiquid L2 WebSocket
   → latest in-memory L2Book
   → 1-second decision tick
   → L2FeatureBuilder
@@ -39,9 +42,13 @@ Implements the current MVP learner: masked Double Q-learning with linear functio
 
 Owns the runtime loop and ties WebSocket, features, broker, learner, replay, and UI state together.
 
+### `engine/RlForegroundService.kt`
+
+Android foreground service that owns long-running operation, keeps a persistent notification visible, and exposes a Stop action.
+
 ### `MainActivity.kt`
 
-Jetpack Compose dashboard.
+Jetpack Compose dashboard and Start/Stop controls for the foreground service.
 
 ## Important design decisions
 

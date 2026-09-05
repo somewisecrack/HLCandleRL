@@ -1,8 +1,12 @@
 package com.example.hlphonerl
 
+import android.Manifest
+import android.content.Intent
+import android.os.Build
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
@@ -17,7 +21,8 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
-import com.example.hlphonerl.engine.RlEngine
+import com.example.hlphonerl.engine.AppRuntime
+import com.example.hlphonerl.engine.RlForegroundService
 
 private val Ink = Color(0xFFE9EEF7)
 private val Muted = Color(0xFF8F9BAE)
@@ -30,11 +35,13 @@ private val Amber = Color(0xFFFFC857)
 private val Blue = Color(0xFF78A6FF)
 
 class MainActivity : ComponentActivity() {
-    private var engine: RlEngine? = null
+    private val notificationPermission = registerForActivityResult(ActivityResultContracts.RequestPermission()) { }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        engine = RlEngine("xyz:SP500")
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            notificationPermission.launch(Manifest.permission.POST_NOTIFICATIONS)
+        }
         setContent {
             MaterialTheme(
                 colorScheme = darkColorScheme(
@@ -46,20 +53,24 @@ class MainActivity : ComponentActivity() {
                     onSurface = Ink
                 )
             ) {
-                val e = engine!!
+                val e = AppRuntime.engine
                 val state by e.state.collectAsState()
                 Dashboard(
                     state = state,
-                    onStart = { e.start() },
-                    onStop = { e.stop() }
+                    onStart = { startLearnerService() },
+                    onStop = { stopLearnerService() }
                 )
             }
         }
     }
 
-    override fun onDestroy() {
-        engine?.stop()
-        super.onDestroy()
+    private fun startLearnerService() {
+        val intent = Intent(this, RlForegroundService::class.java).setAction(RlForegroundService.ACTION_START)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) startForegroundService(intent) else startService(intent)
+    }
+
+    private fun stopLearnerService() {
+        startService(Intent(this, RlForegroundService::class.java).setAction(RlForegroundService.ACTION_STOP))
     }
 }
 
