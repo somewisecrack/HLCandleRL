@@ -13,12 +13,45 @@ data class Transition(
     val nextState: FloatArray,
     val nextMask: BooleanArray,
     val done: Boolean
-)
+) {
+    fun toJsonLine(): String = JSONObject()
+        .put("state", JSONArray().also { arr -> state.forEach { arr.put(it.toDouble()) } })
+        .put("action", action)
+        .put("reward", reward)
+        .put("nextState", JSONArray().also { arr -> nextState.forEach { arr.put(it.toDouble()) } })
+        .put("nextMask", JSONArray().also { arr -> nextMask.forEach { arr.put(it) } })
+        .put("done", done)
+        .toString()
+
+    companion object {
+        fun fromJsonLine(line: String): Transition {
+            val obj = JSONObject(line)
+            fun floats(name: String): FloatArray {
+                val arr = obj.getJSONArray(name)
+                return FloatArray(arr.length()) { i -> arr.getDouble(i).toFloat() }
+            }
+            fun bools(name: String): BooleanArray {
+                val arr = obj.getJSONArray(name)
+                return BooleanArray(arr.length()) { i -> arr.getBoolean(i) }
+            }
+            return Transition(
+                state = floats("state"),
+                action = obj.getInt("action"),
+                reward = obj.getDouble("reward"),
+                nextState = floats("nextState"),
+                nextMask = bools("nextMask"),
+                done = obj.getBoolean("done")
+            )
+        }
+    }
+}
 
 class ReplayBuffer(private val capacity: Int = 20_000, private val rng: Random = Random(7)) {
     private val data = ArrayList<Transition>(capacity)
     fun add(t: Transition) { if (data.size == capacity) data.removeAt(0); data.add(t) }
+    fun addAll(items: Iterable<Transition>) { items.forEach { add(it) } }
     fun size() = data.size
+    fun snapshot(): List<Transition> = data.toList()
     fun sample(n: Int): List<Transition> = List(minOf(n, data.size)) { data[rng.nextInt(data.size)] }
 }
 

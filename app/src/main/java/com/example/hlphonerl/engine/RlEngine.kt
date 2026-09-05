@@ -8,6 +8,7 @@ import com.example.hlphonerl.rl.*
 import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
+import java.io.File
 
  data class EngineUiState(
     val status: String = "idle",
@@ -41,9 +42,18 @@ class RlEngine(private val coin: String = "xyz:SP500") {
     private var lastState: FloatArray? = null
     private var lastAction: Int? = null
     private var stepNo: Long = 0
+    private var persistenceDir: File? = null
+    private var replayAppendFile: File? = null
+    private var loadedReplay = false
 
     private val _state = MutableStateFlow(EngineUiState(coin = coin))
     val state: StateFlow<EngineUiState> = _state
+
+    fun attachPersistenceDir(dir: File) {
+        persistenceDir = dir.also { it.mkdirs() }
+        replayAppendFile = File(dir, "replay.jsonl")
+        loadReplayOnce()
+    }
 
     fun exportPolicyJson(): String = learner.snapshotJson()
 
@@ -52,7 +62,22 @@ class RlEngine(private val coin: String = "xyz:SP500") {
         _state.value = _state.value.copy(updates = learner.updates, epsilon = learner.epsilon, status = "policy restored")
     }
 
+    fun compactReplayFile() {
+        val file = replayAppendFile ?: return
+        try {
+            val tmp = File(file.parentFile, "replay.jsonl.tmp")
+            tmp.writeText(replay.snapshot().joinToString(separator = "\n", postfix = "\n") { it.toJsonLine() })
+            if (!tmp.renameTo(file)) {
+                file.delete()
+                tmp.renameTo(file)
+            }
+        } catch (_: Exception) {
+            _state.value = _state.value.copy(status = "replay checkpoint failed")
+        }
+    }
+
     fun start() {
+        loadReplayOnce()
         if (_state.value.running) return
         _state.value = _state.value.copy(status = "starting", running = true)
         ws = HyperLiquidWsClient(
@@ -88,7 +113,9 @@ class RlEngine(private val coin: String = "xyz:SP500") {
         val nextState = featureBuilder.build(book, broker.position, stepNo) ?: state
         lastState?.let { prev ->
             lastAction?.let { a ->
-                replay.add(Transition(prev, a, result.reward, nextState, broker.validMask(), broker.position == null && action == Action.EXIT))
+                val transition = Transition(prev, a, result.reward, nextState, broker.validMask(), broker.position == null && action == Action.EXIT)
+                replay.add(transition)
+                appendTransition(transition)
             }
         }
         if (replay.size() >= 64) learner.train(replay.sample(32))
@@ -100,6 +127,7 @@ class RlEngine(private val coin: String = "xyz:SP500") {
         val q = learner.qValues(state).joinToString(prefix = "[", postfix = "]") { "%.3f".format(it) }
         _state.value = EngineUiState(
             status = "running",
+            running = true,
             coin = coin,
             mid = mid,
             spreadBps = spreadBps,
@@ -114,5 +142,29 @@ class RlEngine(private val coin: String = "xyz:SP500") {
             epsilon = learner.epsilon,
             qValues = q
         )
+    }
+
+    private fun appendTransition(t: Transition) {
+        try {
+            replayAppendFile?.appendText(t.toJsonLine() + "\n")
+        } catch (_: Exception) {
+            _state.value = _state.value.copy(status = "replay append failed")
+        }
+    }
+
+    private fun loadReplayOnce() {
+        if (loadedReplay) return
+        loadedReplay = true
+        val file = replayAppendFile ?: return
+        if (!file.exists()) return
+        try {
+            val loaded = file.readLines().mapNotNull { line ->
+                if (line.isBlank()) null else try { Transition.fromJsonLine(line) } catch (_: Exception) { null }
+            }
+            replay.addAll(loaded)
+            _state.value = _state.value.copy(replay = replay.size(), status = "replay restored: ${replay.size()}")
+        } catch (_: Exception) {
+            _state.value = _state.value.copy(status = "replay restore failed")
+        }
     }
 }

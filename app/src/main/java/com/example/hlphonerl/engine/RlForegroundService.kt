@@ -20,6 +20,7 @@ class RlForegroundService : Service() {
 
     override fun onCreate() {
         super.onCreate()
+        engine.attachPersistenceDir(filesDir.resolve("learning_state"))
         createChannel()
     }
 
@@ -37,7 +38,7 @@ class RlForegroundService : Service() {
     override fun onBind(intent: Intent?): IBinder? = null
 
     override fun onDestroy() {
-        savePolicy()
+        saveLearningState(compactReplay = true)
         notificationJob?.cancel()
         scope.cancel()
         engine.stop()
@@ -45,15 +46,20 @@ class RlForegroundService : Service() {
     }
 
     private fun startLearner() {
-        startForeground(NOTIFICATION_ID, buildNotification("Starting", "Connecting to HyperLiquid L2…"))
+        engine.attachPersistenceDir(filesDir.resolve("learning_state"))
+        startForeground(NOTIFICATION_ID, buildNotification("Starting", "Restoring policy + replay…"))
         loadPolicy()
         engine.start()
         notificationJob?.cancel()
         notificationJob = scope.launch {
             engine.state.collect { s ->
-                if (s.updates > 0 && s.updates / 100 > lastSavedUpdates / 100) savePolicy()
+                // Policy is checkpointed every 100 learner updates. Replay is appended immediately
+                // by RlEngine on every transition and compacted every 500 updates / clean stop.
+                if (s.updates > 0 && s.updates / 100 > lastSavedUpdates / 100) {
+                    saveLearningState(compactReplay = s.updates % 500 == 0)
+                }
                 val title = if (s.running) "HL Phone RL running" else "HL Phone RL paused"
-                val text = "${s.coin} • PnL ${"%+.4f".format(s.equity)} • ${s.action}"
+                val text = "${s.coin} • PnL ${"%+.4f".format(s.equity)} • ${s.action} • replay ${s.replay}"
                 val nm = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
                 nm.notify(NOTIFICATION_ID, buildNotification(title, text))
             }
@@ -61,19 +67,24 @@ class RlForegroundService : Service() {
     }
 
     private fun stopLearner() {
-        savePolicy()
+        saveLearningState(compactReplay = true)
         notificationJob?.cancel()
         engine.stop()
         stopForeground(STOP_FOREGROUND_REMOVE)
         stopSelf()
     }
 
-    private fun savePolicy() {
+    private fun saveLearningState(compactReplay: Boolean) {
         try {
-            getSharedPreferences(PREFS, MODE_PRIVATE)
-                .edit()
-                .putString(KEY_POLICY_JSON, engine.exportPolicyJson())
-                .apply()
+            val dir = filesDir.resolve("learning_state").also { it.mkdirs() }
+            val tmp = dir.resolve("policy.json.tmp")
+            val target = dir.resolve("policy.json")
+            tmp.writeText(engine.exportPolicyJson())
+            if (!tmp.renameTo(target)) {
+                target.delete()
+                tmp.renameTo(target)
+            }
+            if (compactReplay) engine.compactReplayFile()
             lastSavedUpdates = engine.state.value.updates
         } catch (_: Exception) {
             // Best-effort checkpointing; never crash the foreground service while saving.
@@ -81,7 +92,13 @@ class RlForegroundService : Service() {
     }
 
     private fun loadPolicy() {
-        val json = getSharedPreferences(PREFS, MODE_PRIVATE).getString(KEY_POLICY_JSON, null) ?: return
+        val policyFile = filesDir.resolve("learning_state").resolve("policy.json")
+        val legacyJson = getSharedPreferences(PREFS, MODE_PRIVATE).getString(KEY_POLICY_JSON, null)
+        val json = when {
+            policyFile.exists() -> policyFile.readText()
+            legacyJson != null -> legacyJson
+            else -> null
+        } ?: return
         try { engine.importPolicyJson(json) } catch (_: Exception) { }
     }
 

@@ -43,7 +43,8 @@ The current app contains:
 - Masked discrete action space.
 - Online replay buffer.
 - Phone-friendly masked Double-Q learner with linear function approximation.
-- Local policy checkpoint save/load via Android SharedPreferences.
+- Local policy checkpoint save/load via app-private `policy.json`.
+- Durable replay persistence via app-private `replay.jsonl`; each transition is appended immediately and compacted on clean stop.
 - Android foreground service for screen-off/background operation.
 - Persistent notification with live PnL/action and a Stop action.
 - Jetpack Compose UI showing:
@@ -300,7 +301,7 @@ Near-term:
 
 - Add battery-aware pause controls.
 - Add stale-book masks for entries.
-- Persist replay in Room SQLite.
+- Replace JSONL replay with Room SQLite once schema stabilizes.
 - Move policy checkpoints from SharedPreferences to versioned files/Room metadata.
 - Add trade ledger screen.
 - Add PnL chart.
