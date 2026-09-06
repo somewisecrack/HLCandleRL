@@ -59,7 +59,8 @@ class MainActivity : ComponentActivity() {
                     state = state,
                     onStart = { startLearnerService() },
                     onStop = { stopLearnerService() },
-                    onReset = { resetLearnerService() }
+                    onReset = { resetLearnerService() },
+                    onMarketChange = { e.setMarket(it) }
                 )
             }
         }
@@ -84,7 +85,8 @@ private fun Dashboard(
     state: com.example.hlphonerl.engine.EngineUiState,
     onStart: () -> Unit,
     onStop: () -> Unit,
-    onReset: () -> Unit
+    onReset: () -> Unit,
+    onMarketChange: (String) -> Unit
 ) {
     val pnlColor = when {
         state.equity > 0 -> Green
@@ -128,14 +130,21 @@ private fun Dashboard(
 
             CardPanel {
                 SectionTitle("Market")
+                if (!state.running) {
+                    MarketSelector(state.market, state.markets.keys.toList(), onMarketChange)
+                    Spacer(Modifier.height(8.dp))
+                }
                 MetricGrid(
                     listOf(
+                        "Market" to state.market,
                         "Coin" to state.coin,
                         "Mid" to "%.4f".format(state.mid),
                         "Spread" to "%.3f bps".format(state.spreadBps),
                         "Position" to state.position,
                         "HL taker" to "%.3f bps".format(state.crossFeeBps),
-                        "Funding/hr" to "%.4f bps".format(state.fundingBpsPerHour)
+                        "Funding/hr" to "%.4f bps".format(state.fundingBpsPerHour),
+                        "L2 updates" to state.bookUpdates.toString(),
+                        "Book age" to "${state.bookAgeMs} ms"
                     )
                 )
             }
@@ -210,7 +219,25 @@ private fun Header(running: Boolean, status: String, onStart: () -> Unit, onStop
             shape = RoundedCornerShape(14.dp),
             colors = ButtonDefaults.outlinedButtonColors(contentColor = Red)
         ) { Text("Reset learning / archive replay + policy") }
-        Text(status, color = if (status.contains("failure", true)) Red else Muted, style = MaterialTheme.typography.bodySmall)
+        Text(status, color = if (status.contains("failure", true) || status.contains("failed", true)) Red else Muted, style = MaterialTheme.typography.bodySmall)
+    }
+}
+
+@Composable
+private fun MarketSelector(selected: String, markets: List<String>, onMarketChange: (String) -> Unit) {
+    var expanded by remember { mutableStateOf(false) }
+    Box {
+        OutlinedButton(onClick = { expanded = true }, modifier = Modifier.fillMaxWidth(), shape = RoundedCornerShape(14.dp)) {
+            Text("Market: $selected")
+        }
+        DropdownMenu(expanded = expanded, onDismissRequest = { expanded = false }) {
+            markets.forEach { label ->
+                DropdownMenuItem(text = { Text(label) }, onClick = {
+                    expanded = false
+                    onMarketChange(label)
+                })
+            }
+        }
     }
 }
 

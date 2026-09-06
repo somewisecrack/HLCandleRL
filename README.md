@@ -2,7 +2,7 @@
 
 **HL Phone RL** is an Android-native prototype for a **fully on-phone**, **virtual-only** reinforcement-learning trading agent for HyperLiquid perps.
 
-The initial target market is HyperLiquid `xyz:SP500`. The agent uses **only public L2 order-book data**. It does not use candles, technical indicators, momentum, volume bars, private keys, or real orders.
+The default target market is HyperLiquid `xyz:SP500`, with selectable markets including BTC/ETH/SOL. The agent uses **only public L2 order-book data**. It does not use candles, technical indicators, momentum, volume bars, private keys, or real orders.
 
 > Status: early MVP. It builds and runs, connects to HyperLiquid L2 WebSocket when Android networking is available, simulates virtual fills, and trains a lightweight masked Double-Q learner online from virtual PnL rewards.
 
@@ -11,6 +11,7 @@ The initial target market is HyperLiquid `xyz:SP500`. The agent uses **only publ
 ## Goals
 
 - Run entirely on an Android phone.
+- Default to `xyz:SP500`, while allowing market selection before starting; policy/replay are isolated per selected coin.
 - Learn by virtual trading directly.
 - Use only HyperLiquid public order-book data.
 - Keep the system safe: no private keys, no real exchange orders.
@@ -36,7 +37,7 @@ This app intentionally does **not** do the following:
 
 The current app contains:
 
-- HyperLiquid public WebSocket client for `l2Book`.
+- HyperLiquid public WebSocket client for `l2Book` with reconnect/resubscribe handling and basic book validation.
 - HyperLiquid public `/info` cost loader for fee schedule and selected-market funding.
 - Top-5 L2 order-book feature builder.
 - Virtual perp broker.
@@ -44,8 +45,8 @@ The current app contains:
 - Masked discrete action space.
 - Online replay buffer.
 - Phone-friendly masked Double-Q learner with linear function approximation.
-- Local policy checkpoint save/load via app-private `policy.json`.
-- Durable replay persistence via app-private `replay.jsonl`; each transition is appended immediately and compacted on clean stop.
+- Local market-specific policy checkpoint save/load via app-private `learning_state/<coin>/policy.json`.
+- Durable market-specific replay persistence via app-private `learning_state/<coin>/replay.jsonl`; each transition is appended immediately and compacted on clean stop.
 - Android foreground service for screen-off/background operation.
 - Persistent notification with live PnL/action and a Stop action.
 - Reset action in the app archives app-private `policy.json` and `replay.jsonl`, clears in-memory broker/replay/learner state, and stops the learner so the next Start begins clean.
@@ -53,7 +54,9 @@ The current app contains:
   - Start / Stop
   - Reset learning / archive replay + policy
   - connection status
+  - market selector
   - current market
+  - L2 update count and book age
   - current policy description
   - mid price
   - spread

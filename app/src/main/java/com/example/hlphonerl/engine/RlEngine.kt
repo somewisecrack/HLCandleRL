@@ -14,7 +14,9 @@ import java.io.File
  data class EngineUiState(
     val status: String = "idle",
     val running: Boolean = false,
+    val market: String = "SP500",
     val coin: String = "xyz:SP500",
+    val markets: Map<String, String> = emptyMap(),
     val policy: String = "Masked Double Q-learning from L2 order book only",
     val learningRule: String = "epsilon-greedy actions + replay + executable-equity reward",
     val mid: Double = 0.0,
@@ -29,14 +31,21 @@ import java.io.File
     val updates: Int = 0,
     val epsilon: Double = 0.0,
     val qValues: String = "",
+    val bookUpdates: Long = 0,
+    val bookAgeMs: Long = 0,
     val crossFeeBps: Double = 0.0,
     val fundingBpsPerHour: Double = 0.0,
     val costSource: String = "not_loaded"
 )
 
-class RlEngine(private val coin: String = "xyz:SP500") {
+class RlEngine(
+    defaultMarketLabel: String = "SP500",
+    private val markets: Map<String, String> = mapOf("SP500" to "xyz:SP500")
+) {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
     private var decisionJob: Job? = null
+    private var marketLabel: String = defaultMarketLabel
+    private var coin: String = markets.getValue(defaultMarketLabel)
     private val featureBuilder = L2FeatureBuilder(depth = 5)
     private val broker = VirtualPerpBroker()
     private val infoClient = HyperLiquidInfoClient()
@@ -53,15 +62,51 @@ class RlEngine(private val coin: String = "xyz:SP500") {
     private var persistenceDir: File? = null
     private var replayAppendFile: File? = null
     private var loadedReplay = false
+    private var persistenceRoot: File? = null
+    private var bookUpdates: Long = 0L
+    private var lastBookWallMillis: Long = 0L
 
-    private val _state = MutableStateFlow(EngineUiState(coin = coin))
+    private val _state = MutableStateFlow(EngineUiState(market = marketLabel, coin = coin, markets = markets))
     val state: StateFlow<EngineUiState> = _state
 
     fun attachPersistenceDir(dir: File) {
-        persistenceDir = dir.also { it.mkdirs() }
-        replayAppendFile = File(dir, "replay.jsonl")
+        persistenceRoot = dir.also { it.mkdirs() }
+        configureMarketPersistence()
         loadReplayOnce()
     }
+
+    fun setMarket(label: String) {
+        if (_state.value.running || decisionJob != null) return
+        val newCoin = markets[label] ?: return
+        marketLabel = label
+        coin = newCoin
+        loadedReplay = false
+        replay.clear()
+        broker.reset()
+        learner.reset()
+        latestBook = null
+        lastEquity = null
+        pendingState = null
+        pendingAction = null
+        pendingDone = false
+        lastDecisionBookTimeMillis = 0L
+        stepNo = 0L
+        bookUpdates = 0L
+        lastBookWallMillis = 0L
+        featureBuilder.reset()
+        configureMarketPersistence()
+        loadReplayOnce()
+        _state.value = EngineUiState(status = "market changed", market = marketLabel, coin = coin, markets = markets, replay = replay.size())
+    }
+
+    private fun configureMarketPersistence() {
+        val root = persistenceRoot ?: return
+        val safe = coin.replace(Regex("[^A-Za-z0-9_.-]"), "_")
+        persistenceDir = File(root, safe).also { it.mkdirs() }
+        replayAppendFile = File(persistenceDir, "replay.jsonl")
+    }
+
+    fun policyFile(): File? = persistenceDir?.let { File(it, "policy.json") }
 
     fun exportPolicyJson(): String = learner.snapshotJson()
 
@@ -97,7 +142,9 @@ class RlEngine(private val coin: String = "xyz:SP500") {
         _state.value = EngineUiState(
             status = if (wasRunning) "learning reset; press Start" else "learning reset",
             running = false,
+            market = marketLabel,
             coin = coin,
+            markets = markets,
             crossFeeBps = broker.crossFeeRate * 10_000.0,
             fundingBpsPerHour = broker.fundingRateHourly * 10_000.0,
             costSource = broker.costSource
@@ -151,7 +198,13 @@ class RlEngine(private val coin: String = "xyz:SP500") {
             )
             ws = HyperLiquidWsClient(
                 coin = coin,
-                onBook = { latestBook = it },
+                onBook = {
+                    if (it.coin == coin && it.timeMillis > lastDecisionBookTimeMillis) {
+                        latestBook = it
+                        bookUpdates += 1
+                        lastBookWallMillis = System.currentTimeMillis()
+                    }
+                },
                 onStatus = { s -> _state.value = _state.value.copy(status = s) }
             ).also { it.connect() }
             while (isActive) {
@@ -219,7 +272,9 @@ class RlEngine(private val coin: String = "xyz:SP500") {
         _state.value = EngineUiState(
             status = "running",
             running = true,
+            market = marketLabel,
             coin = coin,
+            markets = markets,
             mid = mid,
             spreadBps = spreadBps,
             action = action.name,
@@ -232,6 +287,8 @@ class RlEngine(private val coin: String = "xyz:SP500") {
             updates = learner.updates,
             epsilon = learner.epsilon,
             qValues = q,
+            bookUpdates = bookUpdates,
+            bookAgeMs = if (lastBookWallMillis == 0L) 0L else System.currentTimeMillis() - lastBookWallMillis,
             crossFeeBps = broker.crossFeeRate * 10_000.0,
             fundingBpsPerHour = broker.fundingRateHourly * 10_000.0,
             costSource = broker.costSource
