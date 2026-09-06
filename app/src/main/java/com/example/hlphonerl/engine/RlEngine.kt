@@ -67,6 +67,36 @@ class RlEngine(private val coin: String = "xyz:SP500") {
         _state.value = _state.value.copy(updates = learner.updates, epsilon = learner.epsilon, status = "policy restored")
     }
 
+    fun resetLearning() {
+        val wasRunning = _state.value.running
+        stop()
+        val ts = System.currentTimeMillis()
+        try {
+            persistenceDir?.let { dir ->
+                listOf("policy.json", "replay.jsonl").forEach { name ->
+                    val f = File(dir, name)
+                    if (f.exists()) f.renameTo(File(dir, "${f.nameWithoutExtension}.archive-$ts.${f.extension}"))
+                }
+            }
+        } catch (_: Exception) { }
+        broker.reset()
+        learner.reset()
+        replay.clear()
+        latestBook = null
+        lastEquity = null
+        lastDecisionBookTimeMillis = 0L
+        stepNo = 0L
+        loadedReplay = true
+        _state.value = EngineUiState(
+            status = if (wasRunning) "learning reset; press Start" else "learning reset",
+            running = false,
+            coin = coin,
+            crossFeeBps = broker.crossFeeRate * 10_000.0,
+            fundingBpsPerHour = broker.fundingRateHourly * 10_000.0,
+            costSource = broker.costSource
+        )
+    }
+
     fun compactReplayFile() {
         val file = replayAppendFile ?: return
         try {

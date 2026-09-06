@@ -48,8 +48,10 @@ The current app contains:
 - Durable replay persistence via app-private `replay.jsonl`; each transition is appended immediately and compacted on clean stop.
 - Android foreground service for screen-off/background operation.
 - Persistent notification with live PnL/action and a Stop action.
+- Reset action in the app archives app-private `policy.json` and `replay.jsonl`, clears in-memory broker/replay/learner state, and stops the learner so the next Start begins clean.
 - Jetpack Compose UI showing:
   - Start / Stop
+  - Reset learning / archive replay + policy
   - connection status
   - current market
   - current policy description

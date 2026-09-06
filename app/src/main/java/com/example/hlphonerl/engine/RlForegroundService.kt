@@ -30,6 +30,10 @@ class RlForegroundService : Service() {
                 stopLearner()
                 return START_NOT_STICKY
             }
+            ACTION_RESET -> {
+                resetLearner()
+                return START_NOT_STICKY
+            }
             else -> startLearner()
         }
         return START_STICKY
@@ -64,6 +68,14 @@ class RlForegroundService : Service() {
                 nm.notify(NOTIFICATION_ID, buildNotification(title, text))
             }
         }
+    }
+
+    private fun resetLearner() {
+        engine.attachPersistenceDir(filesDir.resolve("learning_state"))
+        notificationJob?.cancel()
+        engine.resetLearning()
+        stopForeground(STOP_FOREGROUND_REMOVE)
+        stopSelf()
     }
 
     private fun stopLearner() {
@@ -138,6 +150,7 @@ class RlForegroundService : Service() {
     companion object {
         const val ACTION_START = "com.example.hlphonerl.START_LEARNER"
         const val ACTION_STOP = "com.example.hlphonerl.STOP_LEARNER"
+        const val ACTION_RESET = "com.example.hlphonerl.RESET_LEARNING"
         private const val CHANNEL_ID = "hl_phone_rl_learner"
         private const val NOTIFICATION_ID = 42
         private const val PREFS = "hl_phone_rl_policy"

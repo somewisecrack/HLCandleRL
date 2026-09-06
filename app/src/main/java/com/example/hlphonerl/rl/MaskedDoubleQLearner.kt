@@ -50,6 +50,7 @@ class ReplayBuffer(private val capacity: Int = 20_000, private val rng: Random =
     private val data = ArrayList<Transition>(capacity)
     fun add(t: Transition) { if (data.size == capacity) data.removeAt(0); data.add(t) }
     fun addAll(items: Iterable<Transition>) { items.forEach { add(it) } }
+    fun clear() { data.clear() }
     fun size() = data.size
     fun snapshot(): List<Transition> = data.toList()
     fun sample(n: Int): List<Transition> = List(minOf(n, data.size)) { data[rng.nextInt(data.size)] }
@@ -118,6 +119,17 @@ class MaskedDoubleQLearner(
         }
         loadMatrix("wA", wA)
         loadMatrix("wB", wB)
+    }
+
+    fun reset() {
+        for (a in 0 until actions) {
+            for (i in 0 until inputDim + 1) {
+                wA[a][i] = rng.nextDouble(-0.001, 0.001)
+                wB[a][i] = rng.nextDouble(-0.001, 0.001)
+            }
+        }
+        epsilon = 0.20
+        updates = 0
     }
 
     fun train(batch: List<Transition>) {

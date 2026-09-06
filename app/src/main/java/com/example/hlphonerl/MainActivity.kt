@@ -58,7 +58,8 @@ class MainActivity : ComponentActivity() {
                 Dashboard(
                     state = state,
                     onStart = { startLearnerService() },
-                    onStop = { stopLearnerService() }
+                    onStop = { stopLearnerService() },
+                    onReset = { resetLearnerService() }
                 )
             }
         }
@@ -72,13 +73,18 @@ class MainActivity : ComponentActivity() {
     private fun stopLearnerService() {
         startService(Intent(this, RlForegroundService::class.java).setAction(RlForegroundService.ACTION_STOP))
     }
+
+    private fun resetLearnerService() {
+        startService(Intent(this, RlForegroundService::class.java).setAction(RlForegroundService.ACTION_RESET))
+    }
 }
 
 @Composable
 private fun Dashboard(
     state: com.example.hlphonerl.engine.EngineUiState,
     onStart: () -> Unit,
-    onStop: () -> Unit
+    onStop: () -> Unit,
+    onReset: () -> Unit
 ) {
     val pnlColor = when {
         state.equity > 0 -> Green
@@ -102,7 +108,7 @@ private fun Dashboard(
                 .padding(16.dp),
             verticalArrangement = Arrangement.spacedBy(14.dp)
         ) {
-            Header(state.running, state.status, onStart, onStop)
+            Header(state.running, state.status, onStart, onStop, onReset)
 
             CardPanel {
                 Text("Virtual PnL", color = Muted, style = MaterialTheme.typography.labelLarge)
@@ -175,7 +181,7 @@ private fun Dashboard(
 }
 
 @Composable
-private fun Header(running: Boolean, status: String, onStart: () -> Unit, onStop: () -> Unit) {
+private fun Header(running: Boolean, status: String, onStart: () -> Unit, onStop: () -> Unit, onReset: () -> Unit) {
     Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
         Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
             Column(Modifier.weight(1f)) {
@@ -198,6 +204,12 @@ private fun Header(running: Boolean, status: String, onStart: () -> Unit, onStop
                 shape = RoundedCornerShape(14.dp)
             ) { Text("Stop") }
         }
+        OutlinedButton(
+            onClick = onReset,
+            modifier = Modifier.fillMaxWidth(),
+            shape = RoundedCornerShape(14.dp),
+            colors = ButtonDefaults.outlinedButtonColors(contentColor = Red)
+        ) { Text("Reset learning / archive replay + policy") }
         Text(status, color = if (status.contains("failure", true)) Red else Muted, style = MaterialTheme.typography.bodySmall)
     }
 }

@@ -29,6 +29,12 @@ class VirtualPerpBroker(
         this.costSource = source
     }
 
+    fun reset() {
+        cashPnl = 0.0
+        position = null
+        lastFundingMillis = null
+    }
+
     fun equity(book: L2Book): Double = cashPnl + unrealized(book)
 
     fun validMask(): BooleanArray = if (position == null) {
