@@ -58,7 +58,7 @@ class ReplayBuffer(private val capacity: Int = 20_000, private val rng: Random =
 
 /**
  * Phone-friendly pure RL baseline: masked Double Q-learning with linear function approximation.
- * It learns only from virtual trading rewards and L2-book observations. No indicators/candles.
+ * It learns only from virtual trading rewards and OHLCV/perp-context observations. No hardcoded indicators or entry rules.
  * This can later be replaced by a small dueling neural net while preserving the same interface.
  */
 class MaskedDoubleQLearner(

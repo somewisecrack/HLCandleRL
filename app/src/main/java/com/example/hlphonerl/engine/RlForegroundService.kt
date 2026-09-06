@@ -63,7 +63,7 @@ class RlForegroundService : Service() {
                 if (s.updates > 0 && s.updates / 100 > lastSavedUpdates / 100) {
                     saveLearningState(compactReplay = s.updates % 500 == 0)
                 }
-                val title = if (s.running) "HL Phone RL running" else "HL Phone RL paused"
+                val title = if (s.running) "HL Candle RL running" else "HL Candle RL paused"
                 val text = "${s.coin} • PnL ${"%+.4f".format(s.equity)} • ${s.action} • replay ${s.replay}"
                 val nm = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
                 nm.notify(NOTIFICATION_ID, buildNotification(title, text))
@@ -121,10 +121,10 @@ class RlForegroundService : Service() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             val channel = NotificationChannel(
                 CHANNEL_ID,
-                "HL Phone RL learner",
+                "HL Candle RL learner",
                 NotificationManager.IMPORTANCE_LOW
             ).apply {
-                description = "Keeps the virtual L2 RL learner running while the screen is off"
+                description = "Keeps the virtual OHLCV RL learner running while the screen is off"
             }
             val nm = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
             nm.createNotificationChannel(channel)

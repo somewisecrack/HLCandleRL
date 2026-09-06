@@ -2,9 +2,9 @@ package com.example.hlphonerl.engine
 
 import com.example.hlphonerl.broker.VirtualPerpBroker
 import com.example.hlphonerl.data.*
+import com.example.hlphonerl.exchange.HyperLiquidCandleWsClient
 import com.example.hlphonerl.exchange.HyperLiquidInfoClient
-import com.example.hlphonerl.exchange.HyperLiquidWsClient
-import com.example.hlphonerl.features.L2FeatureBuilder
+import com.example.hlphonerl.features.OhlcvFeatureBuilder
 import com.example.hlphonerl.rl.*
 import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -17,10 +17,11 @@ import java.io.File
     val market: String = "SP500",
     val coin: String = "xyz:SP500",
     val markets: Map<String, String> = emptyMap(),
-    val policy: String = "Masked Double Q-learning from L2 order book only",
+    val policy: String = "Masked Double Q-learning from OHLCV + public perp state",
     val learningRule: String = "epsilon-greedy actions + replay + executable-equity reward",
-    val mid: Double = 0.0,
-    val spreadBps: Double = 0.0,
+    val interval: String = "1m",
+    val close: Double = 0.0,
+    val candleVolume: Double = 0.0,
     val action: String = "WAIT",
     val reason: String = "",
     val reward: Double = 0.0,
@@ -31,10 +32,14 @@ import java.io.File
     val updates: Int = 0,
     val epsilon: Double = 0.0,
     val qValues: String = "",
-    val bookUpdates: Long = 0,
-    val bookAgeMs: Long = 0,
+    val candleUpdates: Long = 0,
+    val candleAgeMs: Long = 0,
     val crossFeeBps: Double = 0.0,
     val fundingBpsPerHour: Double = 0.0,
+    val openInterest: Double = 0.0,
+    val premiumBps: Double = 0.0,
+    val markPx: Double = 0.0,
+    val oraclePx: Double = 0.0,
     val costSource: String = "not_loaded"
 )
 
@@ -46,27 +51,29 @@ class RlEngine(
     private var decisionJob: Job? = null
     private var marketLabel: String = defaultMarketLabel
     private var coin: String = markets.getValue(defaultMarketLabel)
-    private val featureBuilder = L2FeatureBuilder(depth = 5)
+    private val interval = "1m"
+    private val featureBuilder = OhlcvFeatureBuilder(window = 32)
     private val broker = VirtualPerpBroker()
     private val infoClient = HyperLiquidInfoClient()
     private val learner = MaskedDoubleQLearner(inputDim = featureBuilder.featureSize)
     private val replay = ReplayBuffer()
-    private var ws: HyperLiquidWsClient? = null
-    private var latestBook: L2Book? = null
+    private var ws: HyperLiquidCandleWsClient? = null
+    private var latestCandle: Candle? = null
+    private var context: PerpContext = PerpContext()
     private var lastEquity: Double? = null
     private var pendingState: FloatArray? = null
     private var pendingAction: Int? = null
     private var pendingDone: Boolean = false
-    private var lastDecisionBookTimeMillis: Long = 0L
+    private var lastDecisionCandleTimeMillis: Long = 0L
     private var stepNo: Long = 0
     private var persistenceDir: File? = null
     private var replayAppendFile: File? = null
     private var loadedReplay = false
     private var persistenceRoot: File? = null
-    private var bookUpdates: Long = 0L
-    private var lastBookWallMillis: Long = 0L
+    private var candleUpdates: Long = 0L
+    private var lastCandleWallMillis: Long = 0L
 
-    private val _state = MutableStateFlow(EngineUiState(market = marketLabel, coin = coin, markets = markets))
+    private val _state = MutableStateFlow(EngineUiState(market = marketLabel, coin = coin, markets = markets, interval = interval))
     val state: StateFlow<EngineUiState> = _state
 
     fun attachPersistenceDir(dir: File) {
@@ -84,19 +91,10 @@ class RlEngine(
         replay.clear()
         broker.reset()
         learner.reset()
-        latestBook = null
-        lastEquity = null
-        pendingState = null
-        pendingAction = null
-        pendingDone = false
-        lastDecisionBookTimeMillis = 0L
-        stepNo = 0L
-        bookUpdates = 0L
-        lastBookWallMillis = 0L
-        featureBuilder.reset()
+        clearRuntime()
         configureMarketPersistence()
         loadReplayOnce()
-        _state.value = EngineUiState(status = "market changed", market = marketLabel, coin = coin, markets = markets, replay = replay.size())
+        _state.value = EngineUiState(status = "market changed", market = marketLabel, coin = coin, markets = markets, interval = interval, replay = replay.size())
     }
 
     private fun configureMarketPersistence() {
@@ -107,9 +105,7 @@ class RlEngine(
     }
 
     fun policyFile(): File? = persistenceDir?.let { File(it, "policy.json") }
-
     fun exportPolicyJson(): String = learner.snapshotJson()
-
     fun importPolicyJson(json: String) {
         learner.restoreJson(json)
         _state.value = _state.value.copy(updates = learner.updates, epsilon = learner.epsilon, status = "policy restored")
@@ -130,14 +126,7 @@ class RlEngine(
         broker.reset()
         learner.reset()
         replay.clear()
-        latestBook = null
-        lastEquity = null
-        pendingState = null
-        pendingAction = null
-        pendingDone = false
-        lastDecisionBookTimeMillis = 0L
-        stepNo = 0L
-        featureBuilder.reset()
+        clearRuntime()
         loadedReplay = true
         _state.value = EngineUiState(
             status = if (wasRunning) "learning reset; press Start" else "learning reset",
@@ -145,10 +134,25 @@ class RlEngine(
             market = marketLabel,
             coin = coin,
             markets = markets,
+            interval = interval,
             crossFeeBps = broker.crossFeeRate * 10_000.0,
             fundingBpsPerHour = broker.fundingRateHourly * 10_000.0,
             costSource = broker.costSource
         )
+    }
+
+    private fun clearRuntime() {
+        latestCandle = null
+        context = PerpContext()
+        lastEquity = null
+        pendingState = null
+        pendingAction = null
+        pendingDone = false
+        lastDecisionCandleTimeMillis = 0L
+        stepNo = 0L
+        candleUpdates = 0L
+        lastCandleWallMillis = 0L
+        featureBuilder.reset()
     }
 
     fun compactReplayFile() {
@@ -168,13 +172,14 @@ class RlEngine(
     fun start() {
         loadReplayOnce()
         if (_state.value.running || decisionJob != null) return
-        _state.value = _state.value.copy(status = "loading HyperLiquid costs", running = false)
+        _state.value = _state.value.copy(status = "loading HyperLiquid costs/context", running = false)
         decisionJob = scope.launch {
             try {
-                val costs = withContext(Dispatchers.IO) { infoClient.loadCosts(coin) }
+                val costs = withContext(Dispatchers.IO) { infoClient.loadCostsAndContext(coin) }
                 broker.setCosts(costs.crossFeeRate, costs.addFeeRate, costs.fundingRateHourly, costs.source)
+                context = costs.context
             } catch (e: Exception) {
-                _state.value = _state.value.copy(status = "cost load failed: ${e.javaClass.simpleName}; refusing to train", running = false)
+                _state.value = _state.value.copy(status = "cost/context load failed: ${e.javaClass.simpleName}; refusing to train", running = false)
                 decisionJob = null
                 return@launch
             }
@@ -183,12 +188,7 @@ class RlEngine(
                 decisionJob = null
                 return@launch
             }
-            latestBook = null
-            lastDecisionBookTimeMillis = 0L
-            pendingState = null
-            pendingAction = null
-            pendingDone = false
-            featureBuilder.reset()
+            clearRuntime()
             _state.value = _state.value.copy(
                 status = "starting",
                 running = true,
@@ -196,13 +196,14 @@ class RlEngine(
                 fundingBpsPerHour = broker.fundingRateHourly * 10_000.0,
                 costSource = broker.costSource
             )
-            ws = HyperLiquidWsClient(
+            ws = HyperLiquidCandleWsClient(
                 coin = coin,
-                onBook = {
-                    if (it.coin == coin && it.timeMillis > lastDecisionBookTimeMillis) {
-                        latestBook = it
-                        bookUpdates += 1
-                        lastBookWallMillis = System.currentTimeMillis()
+                interval = interval,
+                onCandle = {
+                    if (it.coin == coin && it.openTimeMillis > lastDecisionCandleTimeMillis) {
+                        latestCandle = it
+                        candleUpdates += 1
+                        lastCandleWallMillis = System.currentTimeMillis()
                     }
                 },
                 onStatus = { s -> _state.value = _state.value.copy(status = s) }
@@ -222,18 +223,22 @@ class RlEngine(
         _state.value = _state.value.copy(status = "stopped", running = false)
     }
 
-    private fun tick() {
-        val book = latestBook ?: return
-        if (book.timeMillis == lastDecisionBookTimeMillis) return
-        lastDecisionBookTimeMillis = book.timeMillis
+    private suspend fun tick() {
+        val candle = latestCandle ?: return
+        if (candle.openTimeMillis == lastDecisionCandleTimeMillis) return
+        lastDecisionCandleTimeMillis = candle.openTimeMillis
         stepNo++
-        val stateBeforeAction = featureBuilder.build(book, broker.position, stepNo) ?: return
+        if (stepNo % 60L == 0L) {
+            try { context = withContext(Dispatchers.IO) { infoClient.loadContext(coin) } } catch (_: Exception) { }
+        }
+        val frame = MarketFrame(candle, context)
+        val stateBeforeAction = featureBuilder.build(frame, broker.position, stepNo) ?: return
         val firstDecision = lastEquity == null
-        val previousEquity = lastEquity ?: broker.equity(book)
+        val previousEquity = lastEquity ?: broker.equity(frame)
 
         pendingState?.let { ps ->
             pendingAction?.let { pa ->
-                val intervalReward = broker.equity(book) - previousEquity
+                val intervalReward = broker.equity(frame) - previousEquity
                 val transition = Transition(ps, pa, intervalReward, stateBeforeAction, broker.validMask(), pendingDone)
                 replay.add(transition)
                 appendTransition(transition)
@@ -244,7 +249,7 @@ class RlEngine(
         val mask = broker.validMask()
         val actionIdx = learner.select(stateBeforeAction, mask, explore = true)
         val action = Action.entries[actionIdx]
-        val result = broker.step(action, book, stepNo)
+        val result = broker.step(action, frame, stepNo)
         lastEquity = result.equity
         val stateAfterAction = featureBuilder.patchPosition(stateBeforeAction, broker.position, stepNo)
 
@@ -266,8 +271,6 @@ class RlEngine(
             pendingDone = false
         }
 
-        val mid = book.mid ?: 0.0
-        val spreadBps = book.spread?.let { it / mid * 10_000.0 } ?: 0.0
         val q = learner.qValues(stateBeforeAction).joinToString(prefix = "[", postfix = "]") { "%.3f".format(it) }
         _state.value = EngineUiState(
             status = "running",
@@ -275,8 +278,9 @@ class RlEngine(
             market = marketLabel,
             coin = coin,
             markets = markets,
-            mid = mid,
-            spreadBps = spreadBps,
+            interval = interval,
+            close = candle.close,
+            candleVolume = candle.volume,
             action = action.name,
             reason = result.reason,
             reward = result.reward,
@@ -287,20 +291,21 @@ class RlEngine(
             updates = learner.updates,
             epsilon = learner.epsilon,
             qValues = q,
-            bookUpdates = bookUpdates,
-            bookAgeMs = if (lastBookWallMillis == 0L) 0L else System.currentTimeMillis() - lastBookWallMillis,
+            candleUpdates = candleUpdates,
+            candleAgeMs = if (lastCandleWallMillis == 0L) 0L else System.currentTimeMillis() - lastCandleWallMillis,
             crossFeeBps = broker.crossFeeRate * 10_000.0,
             fundingBpsPerHour = broker.fundingRateHourly * 10_000.0,
+            openInterest = context.openInterest,
+            premiumBps = context.premium * 10_000.0,
+            markPx = context.markPx,
+            oraclePx = context.oraclePx,
             costSource = broker.costSource
         )
     }
 
     private fun appendTransition(t: Transition) {
-        try {
-            replayAppendFile?.appendText(t.toJsonLine() + "\n")
-        } catch (_: Exception) {
-            _state.value = _state.value.copy(status = "replay append failed")
-        }
+        try { replayAppendFile?.appendText(t.toJsonLine() + "\n") }
+        catch (_: Exception) { _state.value = _state.value.copy(status = "replay append failed") }
     }
 
     private fun loadReplayOnce() {

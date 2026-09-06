@@ -1,150 +1,124 @@
-# HL Phone RL
+# HL Candle RL
 
-**HL Phone RL** is an Android-native prototype for a **fully on-phone**, **virtual-only** reinforcement-learning trading agent for HyperLiquid perps.
+**HL Candle RL** is an Android-native, phone-running, **virtual-only** reinforcement-learning trading agent for HyperLiquid perps.
 
-The default target market is HyperLiquid `xyz:SP500`, with selectable markets including BTC/ETH/SOL. The agent uses **only public L2 order-book data**. It does not use candles, technical indicators, momentum, volume bars, private keys, or real orders.
+Default market: `xyz:SP500`. Selectable markets include BTC, ETH, SOL, HYPE, XRP, DOGE, LINK, WTI, and Gold.
 
-> Status: early MVP. It builds and runs, connects to HyperLiquid L2 WebSocket when Android networking is available, simulates virtual fills, and trains a lightweight masked Double-Q learner online from virtual PnL rewards.
+The app now learns from:
+
+- HyperLiquid public OHLCV candles from the WebSocket `candle` subscription
+- HyperLiquid public perp market context from `/info` / `metaAndAssetCtxs`
+- virtual position/account state
+
+It does **not** use L2 order books, technical-indicator rules, hardcoded entry/exit logic, private keys, or real orders.
+
+> Status: source-patched MVP. It needs Android Studio/JDK build verification on a device/emulator.
 
 ---
 
 ## Goals
 
 - Run entirely on an Android phone.
-- Default to `xyz:SP500`, while allowing market selection before starting; policy/replay are isolated per selected coin.
 - Learn by virtual trading directly.
-- Use only HyperLiquid public order-book data.
-- Keep the system safe: no private keys, no real exchange orders.
+- Use compact public market-state data suitable for mobile.
+- Default to `xyz:SP500`, while allowing market selection before starting.
+- Keep policy/replay isolated per selected coin.
+- Keep the system safe: no private keys, no wallet signing, no real exchange orders.
 - Make every action auditable: state → valid action mask → action → virtual fill → reward.
 
 ---
 
-## Non-goals
+## Data used
 
-This app intentionally does **not** do the following:
+### 1. OHLCV candles
 
-- No real trading.
-- No private-key handling.
-- No broker/exchange order placement.
-- No candle-based strategy.
-- No momentum/volume handcrafted strategy.
-- No cloud backend.
-- No server-side model training.
-
----
-
-## Current MVP
-
-The current app contains:
-
-- HyperLiquid public WebSocket client for `l2Book` with reconnect/resubscribe handling and basic book validation.
-- HyperLiquid public `/info` cost loader for fee schedule and selected-market funding.
-- Top-5 L2 order-book feature builder.
-- Virtual perp broker.
-- L2 book-walking virtual marketable fills.
-- Masked discrete action space.
-- Online replay buffer.
-- Phone-friendly masked Double-Q learner with linear function approximation.
-- Local market-specific policy checkpoint save/load via app-private `learning_state/<coin>/policy.json`.
-- Durable market-specific replay persistence via app-private `learning_state/<coin>/replay.jsonl`; each transition is appended immediately and compacted on clean stop.
-- Android foreground service for screen-off/background operation.
-- Persistent notification with live PnL/action and a Stop action.
-- Reset action in the app archives app-private `policy.json` and `replay.jsonl`, clears in-memory broker/replay/learner state, and stops the learner so the next Start begins clean.
-- Jetpack Compose UI showing:
-  - Start / Stop
-  - Reset learning / archive replay + policy
-  - connection status
-  - market selector
-  - current market
-  - L2 update count and book age
-  - current policy description
-  - mid price
-  - spread
-  - virtual position
-  - last action
-  - reward
-  - live equity
-  - realized PnL
-  - replay size
-  - update count
-  - epsilon
-  - Q-values
-
----
-
-## Architecture
-
-```text
-Android app
-  ├── HyperLiquidWsClient
-  │     └── public l2Book WebSocket
-  ├── L2FeatureBuilder
-  │     └── converts book snapshots into normalized L2-only features
-  ├── VirtualPerpBroker
-  │     └── simulates marketable long/short/exit fills through L2 depth
-  ├── MaskedDoubleQLearner
-  │     └── learns action values from virtual trading rewards
-  ├── ReplayBuffer
-  │     └── stores recent online transitions in memory
-  └── Compose UI
-        └── displays live state, policy, PnL, rewards, and Q-values
-```
-
----
-
-## Data source
-
-The app subscribes to HyperLiquid public WebSocket:
+The app subscribes to HyperLiquid public WebSocket candles:
 
 ```json
 {
   "method": "subscribe",
   "subscription": {
-    "type": "l2Book",
-    "coin": "xyz:SP500"
+    "type": "candle",
+    "coin": "xyz:SP500",
+    "interval": "1m"
   }
 }
 ```
 
-The app uses only the L2 book payload:
+Parsed candle fields:
 
 ```text
-bids: price, size, order count
-asks: price, size, order count
+open time
+close time
+open
+high
+low
+close
+volume
+trade count, if present
+```
+
+### 2. Public perp context
+
+The app also loads public selected-market context from HyperLiquid `/info`:
+
+```text
+funding rate
+open interest
+mark price
+oracle price
+premium
+day notional volume
+day base volume
+```
+
+These are market-state inputs, not strategy rules.
+
+### 3. Virtual position state
+
+The model also sees its own virtual state:
+
+```text
+flat/long/short
+position age
+unrealized PnL estimate
+fresh frame flag
 ```
 
 ---
 
-## Observation features
+## Data not used
 
-The MVP uses top-5 book levels.
+- No L2 order book
+- No bid/ask depth
+- No candle strategy rules
+- No RSI/MACD/Bollinger/etc.
+- No handcrafted momentum/volume strategy
+- No private account data
+- No private keys
+- No real orders
 
-Feature groups:
+---
 
-- spread in basis points
-- one-step mid-price return
-- aggregate depth imbalance
-- change in imbalance
-- microprice premium
-- total displayed depth
-- per-level bid price distance from mid
-- per-level bid size
-- per-level bid order count
-- per-level ask price distance from mid
-- per-level ask size
-- per-level ask order count
-- current virtual position side
-- position age
-- unrealized PnL estimate
-- fresh-book flag
+## Current MVP
 
-No candle features are used.
+The app contains:
+
+- HyperLiquid public WebSocket client for `candle` data with reconnect/resubscribe handling.
+- HyperLiquid public `/info` loader for fees, funding, and perp context.
+- OHLCV-window feature builder using a 32-candle rolling window.
+- Virtual perp broker using fixed `$1000` notional per entry.
+- Masked action space.
+- Causal replay transitions aligned to future candle frames.
+- Phone-friendly masked Double-Q learner with linear function approximation.
+- Market-specific policy/replay persistence.
+- Android foreground service for background/screen-off operation.
+- Reset button to archive active replay/policy and clear runtime state.
+- Compose UI showing market, candle, context, PnL, reward, replay, epsilon, and Q-values.
 
 ---
 
 ## Action space
-
-The RL action space is intentionally small and masked.
 
 ```text
 WAIT
@@ -154,181 +128,88 @@ HOLD
 EXIT
 ```
 
-Valid actions depend on virtual position state:
+Valid actions:
 
 ```text
-Flat:
-  valid:   WAIT, ENTER_LONG, ENTER_SHORT
-  invalid: HOLD, EXIT
-
-Holding:
-  valid:   HOLD, EXIT
-  invalid: WAIT, ENTER_LONG, ENTER_SHORT
+Flat:    WAIT, ENTER_LONG, ENTER_SHORT
+Holding: HOLD, EXIT
 ```
 
-This follows the same safety principle used in OptionScalper: operational constraints should be enforced by masks, not learned through punishment.
+Trade size is intentionally fixed for now:
 
-The engine acts only once per fresh L2 book timestamp; it does not repeatedly train on stale snapshots.
+```text
+notional_usd = 1000
+qty = 1000 / execution_price
+```
+
+The agent is currently learning direction/timing/holding technique, not position sizing.
 
 ---
 
-## Reward
+## Execution and reward
 
-Reward is based on change in executable virtual equity:
+Because this app no longer consumes L2 depth, it does not pretend to book-walk depth. Virtual entries/exits execute at the current candle/mark price proxy and apply actual public HyperLiquid fee/funding inputs loaded from `/info`.
 
-```text
-reward_t = virtual_equity_t - virtual_equity_t-1
-```
-
-Virtual equity includes:
-
-- realized cash PnL
-- mark-to-executable liquidation value using current bid/ask
-- HyperLiquid public `/info` market-crossing fee rate
-- HyperLiquid public `/info` selected-market funding rate
-- simulated slippage from walking the visible L2 book
-
-The app refuses to start training if HyperLiquid public cost data cannot be loaded. It does not fall back to zero or synthetic fees.
-
-Marketable virtual orders are simulated as:
+Reward is executable virtual equity change:
 
 ```text
-ENTER_LONG  = buy through asks
-ENTER_SHORT = sell through bids
-EXIT_LONG   = sell through bids
-EXIT_SHORT  = buy through asks
+reward = current_virtual_equity - previous_virtual_equity
 ```
+
+The transition logic is causal:
+
+- immediate entry/exit fee cost is assigned to the selected entry/exit action
+- between-candle mark-to-market movement is assigned to legal interval actions:
+  - `HOLD` while positioned
+  - `WAIT` while flat
+- no replay row should train an action that is illegal in its stored state
 
 ---
 
-## RL method
+## Persistence
 
-The MVP uses a lightweight on-device learner:
-
-```text
-Masked Double Q-learning
-linear function approximation
-online replay
-epsilon-greedy exploration
-```
-
-This is intentionally simpler than a deep neural DQN so it can run immediately on-device without PyTorch/TensorFlow dependencies.
-
-The interface is designed so the learner can later be replaced with:
+Market-specific app-private paths:
 
 ```text
-small Dueling Double DQN
-ONNX Runtime Mobile
-TensorFlow Lite
-custom Kotlin MLP
+filesDir/learning_state/<safe_coin>/policy.json
+filesDir/learning_state/<safe_coin>/replay.jsonl
 ```
 
-without changing the exchange, feature, broker, or UI layers.
-
----
-
-## Project layout
+Examples:
 
 ```text
-app/src/main/java/com/example/hlphonerl/
-  MainActivity.kt
-  data/Models.kt
-  exchange/HyperLiquidWsClient.kt
-  features/L2FeatureBuilder.kt
-  broker/VirtualPerpBroker.kt
-  rl/MaskedDoubleQLearner.kt
-  engine/RlEngine.kt
+learning_state/xyz_SP500/policy.json
+learning_state/BTC/replay.jsonl
 ```
 
----
-
-## Build and run
-
-### Android Studio
-
-1. Open Android Studio.
-2. File → Open.
-3. Select this directory.
-4. Let Gradle sync finish.
-5. Select the `app` run configuration.
-6. Select an emulator or physical Android phone.
-7. Click Run.
-
-### Command line
-
-If Android Studio's bundled JBR is available:
-
-```bash
-cd /Users/rahulgirishkumar/PROJECTS/HLPhoneRL
-JAVA_HOME="/Applications/Android Studio.app/Contents/jbr/Contents/Home" \
-  ~/.gradle/wrapper/dists/gradle-9.3.1-bin/23ovyewtku6u96viwx3xl3oks/gradle-9.3.1/bin/gradle :app:assembleDebug
-```
-
-Debug APK:
-
-```text
-app/build/outputs/apk/debug/app-debug.apk
-```
-
----
-
-## Emulator networking note
-
-If the UI shows:
-
-```text
-Unable to resolve host "api.hyperliquid.xyz"
-```
-
-then the Android emulator has a DNS/networking issue, not an app logic issue.
-
-Try:
-
-- open Chrome inside the emulator and visit `https://api.hyperliquid.xyz/info`
-- cold boot the emulator
-- switch emulator DNS/network
-- run on a physical Android phone
+Replay appends immediately. Policy checkpoints periodically and on service stop. Reset archives active market files and clears in-memory state.
 
 ---
 
 ## Safety
 
-This app is virtual-only by design.
+- Virtual broker only.
+- No private key handling.
+- No wallet connection.
+- No signing.
+- No `/exchange` endpoint usage.
+- No real orders.
 
-Current safety properties:
+---
 
-- No wallet/private key fields.
-- No signing logic.
-- No exchange order endpoint usage.
-- No real-order code path.
-- Only public HyperLiquid L2 WebSocket data.
-- Virtual broker only mutates local in-memory state.
+## Build and run
+
+Open this project in Android Studio and run the `app` configuration on an emulator or device.
+
+Command-line Gradle builds require a configured JDK. This shell previously could not run Gradle because Java was unavailable.
 
 ---
 
 ## Roadmap
 
-Near-term:
-
-- Add battery-aware pause controls.
-- Add stale-book masks for entries.
-- Replace JSONL replay with Room SQLite once schema stabilizes.
-- Move policy checkpoints from SharedPreferences to versioned files/Room metadata.
-- Add trade ledger screen.
-- Add PnL chart.
-- Add settings for coin, notional, max hold, fee, epsilon.
-- Add daily loss/trade-count masks.
-
-Research/learning:
-
-- Add shadow actors: always-wait, random-valid, frozen policy, learner policy.
-- Add policy promotion gates.
-- Add offline replay from captured L2 snapshots.
-- Replace linear approximator with small masked Dueling Double DQN.
-- Add model sanity checks: action collapse, Q-value explosion, reward permutation control.
-
----
-
-## Disclaimer
-
-This is experimental research software for virtual trading only. It is not financial advice and does not place real trades.
+- Add Android unit tests for candle parsing, reward alignment, reset, and broker accounting.
+- Add bounded replay loading instead of reading full JSONL into memory.
+- Add offline candle replay/backtest mode.
+- Add baseline policies: always-wait, random-valid, frozen-policy.
+- Upgrade from linear Double-Q to a small neural DQN/TFLite model if offline validation justifies it.
+- Add optional position sizing only after entry/exit technique works.

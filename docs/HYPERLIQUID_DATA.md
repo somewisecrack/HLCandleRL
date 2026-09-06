@@ -1,36 +1,54 @@
 # HyperLiquid Data
 
-The MVP uses only public WebSocket L2 data.
+HL Candle RL uses public HyperLiquid candle data plus public perp context. It does not use L2 order books.
 
-## Subscription
+## Candle subscription
 
 ```json
 {
   "method": "subscribe",
   "subscription": {
-    "type": "l2Book",
-    "coin": "xyz:SP500"
+    "type": "candle",
+    "coin": "xyz:SP500",
+    "interval": "1m"
   }
 }
 ```
 
-## L2 fields used
-
-Each level has:
+## Candle fields used
 
 ```text
-px: price
-sz: size
-n: number of orders at that level
+t: open time
+T: close time
+o: open
+h: high
+l: low
+c: close
+v: volume
+n: trade count, if present
 ```
 
-The app currently uses top 5 bid levels and top 5 ask levels.
+## Public perp context
 
-## Not used in MVP
+Loaded from HyperLiquid `/info` / `metaAndAssetCtxs` for the selected market:
 
+```text
+funding
+openInterest
+markPx
+oraclePx
+premium
+dayNtlVlm
+dayBaseVlm
+```
+
+Fees are loaded from `/info` / `userFees` using the zero-address public baseline.
+
+## Not used
+
+- L2 book levels
 - trades tape
-- candles
-- funding
-- open interest
-- account data
+- private account data
 - private fills/orders
+- real trading endpoints
+- handcrafted indicator strategy rules

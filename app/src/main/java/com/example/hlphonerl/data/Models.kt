@@ -1,17 +1,34 @@
 package com.example.hlphonerl.data
 
-data class BookLevel(val px: Double, val sz: Double, val n: Int)
-
-data class L2Book(
+data class Candle(
     val coin: String,
-    val timeMillis: Long,
-    val bids: List<BookLevel>,
-    val asks: List<BookLevel>
+    val interval: String,
+    val openTimeMillis: Long,
+    val closeTimeMillis: Long,
+    val open: Double,
+    val high: Double,
+    val low: Double,
+    val close: Double,
+    val volume: Double,
+    val trades: Int = 0
+)
+
+data class PerpContext(
+    val fundingRateHourly: Double = 0.0,
+    val openInterest: Double = 0.0,
+    val markPx: Double = 0.0,
+    val oraclePx: Double = 0.0,
+    val premium: Double = 0.0,
+    val dayNtlVlm: Double = 0.0,
+    val dayBaseVlm: Double = 0.0,
+    val source: String = "not_loaded"
+)
+
+data class MarketFrame(
+    val candle: Candle,
+    val context: PerpContext
 ) {
-    val bestBid: Double? get() = bids.firstOrNull()?.px
-    val bestAsk: Double? get() = asks.firstOrNull()?.px
-    val mid: Double? get() = if (bestBid != null && bestAsk != null) (bestBid!! + bestAsk!!) / 2.0 else null
-    val spread: Double? get() = if (bestBid != null && bestAsk != null) bestAsk!! - bestBid!! else null
+    val price: Double get() = if (context.markPx > 0.0) context.markPx else candle.close
 }
 
 enum class Action { WAIT, ENTER_LONG, ENTER_SHORT, HOLD, EXIT }

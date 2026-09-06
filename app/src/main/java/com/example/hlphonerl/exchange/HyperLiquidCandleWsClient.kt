@@ -1,14 +1,13 @@
 package com.example.hlphonerl.exchange
 
-import com.example.hlphonerl.data.BookLevel
-import com.example.hlphonerl.data.L2Book
+import com.example.hlphonerl.data.Candle
 import okhttp3.*
-import org.json.JSONArray
 import org.json.JSONObject
 
-class HyperLiquidWsClient(
-    private val coin: String = "xyz:SP500",
-    private val onBook: (L2Book) -> Unit,
+class HyperLiquidCandleWsClient(
+    private val coin: String,
+    private val interval: String = "1m",
+    private val onCandle: (Candle) -> Unit,
     private val onStatus: (String) -> Unit
 ) {
     private val client = OkHttpClient.Builder().retryOnConnectionFailure(true).build()
@@ -27,12 +26,12 @@ class HyperLiquidWsClient(
                 onStatus("connected")
                 val sub = JSONObject()
                     .put("method", "subscribe")
-                    .put("subscription", JSONObject().put("type", "l2Book").put("coin", coin))
+                    .put("subscription", JSONObject().put("type", "candle").put("coin", coin).put("interval", interval))
                 webSocket.send(sub.toString())
             }
 
             override fun onMessage(webSocket: WebSocket, text: String) {
-                parseBook(text)?.let(onBook)
+                parseCandle(text)?.let(onCandle)
             }
 
             override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
@@ -61,30 +60,27 @@ class HyperLiquidWsClient(
         ws = null
     }
 
-    private fun parseBook(text: String): L2Book? {
+    private fun parseCandle(text: String): Candle? {
         return try {
             val root = JSONObject(text)
-            if (root.optString("channel") != "l2Book") return null
-            val data = root.getJSONObject("data")
-            val msgCoin = data.optString("coin", coin)
-            if (msgCoin != coin) return null
-            if (!data.has("time")) return null
-            val levels = data.getJSONArray("levels")
-            val bids = parseSide(levels.getJSONArray(0))
-            val asks = parseSide(levels.getJSONArray(1))
-            if (bids.isEmpty() || asks.isEmpty()) return null
-            if (bids.first().px <= 0.0 || asks.first().px <= 0.0 || bids.first().px >= asks.first().px) return null
-            L2Book(
-                coin = msgCoin,
-                timeMillis = data.getLong("time"),
-                bids = bids,
-                asks = asks
-            )
+            if (root.optString("channel") != "candle") return null
+            val d = root.getJSONObject("data")
+            val c = d.optString("s", coin)
+            if (c != coin) return null
+            val i = d.optString("i", interval)
+            if (i != interval) return null
+            Candle(
+                coin = c,
+                interval = i,
+                openTimeMillis = d.getLong("t"),
+                closeTimeMillis = d.optLong("T", d.getLong("t")),
+                open = d.getString("o").toDouble(),
+                high = d.getString("h").toDouble(),
+                low = d.getString("l").toDouble(),
+                close = d.getString("c").toDouble(),
+                volume = d.getString("v").toDouble(),
+                trades = d.optInt("n", 0)
+            ).takeIf { it.open > 0.0 && it.high > 0.0 && it.low > 0.0 && it.close > 0.0 && it.high >= it.low }
         } catch (_: Exception) { null }
     }
-
-    private fun parseSide(arr: JSONArray): List<BookLevel> = List(arr.length()) { i ->
-        val o = arr.getJSONObject(i)
-        BookLevel(o.getString("px").toDouble(), o.getString("sz").toDouble(), o.optInt("n", 0))
-    }.filter { it.px > 0.0 && it.sz > 0.0 }
 }

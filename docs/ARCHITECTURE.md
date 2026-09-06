@@ -1,24 +1,22 @@
 # Architecture
 
-HL Phone RL is intentionally split into small layers so the RL learner can evolve without changing the exchange or virtual-broker code.
+HL Candle RL is an Android-native virtual-only RL app. It now uses OHLCV candles plus public HyperLiquid perp context, not L2 order books.
 
-Status: source-patched MVP. It is virtual-only and uses public HyperLiquid L2 data, but Android builds must be verified in Android Studio/JDK because the current shell has no Java runtime.
+Status: source-patched MVP. Android build/runtime verification still needs Android Studio or a configured JDK.
 
 ## Runtime flow
-
-The learner now runs inside `RlForegroundService`, so it can continue while the app is backgrounded or the screen is off, subject to normal Android foreground-service limits.
 
 ```text
 Android foreground service
   → selected market label / HyperLiquid coin
-  → HyperLiquid public /info fee + funding lookup
-  → HyperLiquid L2 WebSocket
-  → latest in-memory L2Book
-  → fresh-exchange-timestamp decision gate
-  → L2FeatureBuilder
+  → HyperLiquid public /info fee + perp-context lookup
+  → HyperLiquid candle WebSocket subscription
+  → latest in-memory Candle
+  → fresh-candle timestamp decision gate
+  → OhlcvFeatureBuilder
   → action mask from VirtualPerpBroker
   → MaskedDoubleQLearner selects action
-  → VirtualPerpBroker simulates fill/PnL
+  → VirtualPerpBroker simulates fixed-$1000 virtual position
   → causal reward/transition appended to ReplayBuffer
   → learner trains from replay sample
   → UI state updated
@@ -26,49 +24,73 @@ Android foreground service
 
 ## Modules
 
-### `exchange/HyperLiquidWsClient.kt`
+### `exchange/HyperLiquidCandleWsClient.kt`
 
-Connects to `wss://api.hyperliquid.xyz/ws` and subscribes to public `l2Book` for the configured coin. It rejects wrong-coin, missing-timestamp, malformed, empty, non-positive, or crossed books, and reconnects/resubscribes after socket failure.
+Connects to `wss://api.hyperliquid.xyz/ws` and subscribes to public candles:
+
+```json
+{"type":"candle","coin":"<coin>","interval":"1m"}
+```
+
+It parses open/high/low/close/volume/trade-count fields and reconnects/resubscribes after socket failure.
 
 ### `exchange/HyperLiquidInfoClient.kt`
 
-Loads public cost inputs from HyperLiquid `/info`:
+Loads public selected-market data from HyperLiquid `/info`:
 
-- `type: userFees` for base cross/add fee rates using the zero address baseline.
-- `type: metaAndAssetCtxs` for selected-market funding and asset metadata.
+- `userFees` for base cross/add fee rates using the zero-address baseline.
+- `metaAndAssetCtxs` for funding, open interest, mark price, oracle price, premium, and daily volume fields.
 
-Training refuses to start if selected-market cost data cannot be resolved.
+Training refuses to start if selected-market costs/context cannot be resolved.
 
-### `features/L2FeatureBuilder.kt`
+### `features/OhlcvFeatureBuilder.kt`
 
-Builds a fixed-width observation vector from top-5 L2 levels and virtual position state. It does not use candles or handcrafted technical indicators. It has reset/patch helpers so temporal fields are not destroyed by rebuilding features twice on the same book.
+Builds a fixed-width observation vector from:
+
+- 32-candle OHLCV window
+- candle trade count, if present
+- public perp context
+- virtual position state
+
+It does not encode technical-indicator strategy rules. Derived values are normalization of raw candle/context fields, not entry/exit rules.
 
 ### `broker/VirtualPerpBroker.kt`
 
-Maintains one virtual perp position and simulates marketable fills by walking the current visible L2 book.
+Maintains one virtual perp position. Each entry uses fixed `$1000` notional:
+
+```text
+qty = 1000 / execution_price
+```
+
+Since the app no longer consumes L2 depth, it does not simulate book-walking. It uses the current candle/mark price proxy and applies loaded HyperLiquid fee/funding inputs.
 
 ### `rl/MaskedDoubleQLearner.kt`
 
-Implements the current MVP learner: masked Double Q-learning with linear function approximation, online replay, and epsilon-greedy exploration.
+Masked Double Q-learning with linear function approximation, online replay, and epsilon-greedy exploration.
 
 ### `engine/RlEngine.kt`
 
-Owns the runtime loop and ties market selection, cost loading, WebSocket, features, broker, learner, replay, and UI state together. It stores one delayed legal interval transition per fresh book update and uses market-specific persistence.
+Owns market selection, per-market persistence, cost/context loading, candle stream, feature generation, virtual broker, replay, learner, and UI state.
+
+Transitions are causal:
+
+- entry/exit immediate execution cost is assigned to the selected entry/exit action
+- between-candle movement is assigned to legal `HOLD`/`WAIT` interval actions
+- the engine acts only once per fresh candle timestamp
 
 ### `engine/RlForegroundService.kt`
 
-Android foreground service that owns long-running operation, keeps a persistent notification visible, and exposes Stop/Reset actions. Reset suppresses service-destroy checkpointing and clears legacy SharedPreferences policy fallback.
+Keeps the learner running in the background/screen-off using an Android foreground service. Owns policy checkpointing and reset lifecycle handling.
 
 ### `MainActivity.kt`
 
-Jetpack Compose dashboard with market selector, Start/Stop/Reset controls, L2 update count, book age, cost source, PnL/reward, and Q-values.
+Jetpack Compose dashboard with market selector, Start/Stop/Reset controls, candle/context/PnL/reward/replay/Q-value display.
 
 ## Important design decisions
 
-- Default market is `SP500 -> xyz:SP500`; user can select another market before starting.
-- The policy acts only on fresh exchange L2 timestamps; the 1-second loop is just a polling cadence.
+- Default market remains `SP500 -> xyz:SP500`.
+- Other markets can be selected before starting.
+- The model learns from candles + public perp state, not L2.
+- Fixed `$1000` notional is retained so the model learns trading technique first, not sizing.
 - Invalid actions are masked before selection.
-- Reward is based on executable virtual equity, not mid-price fantasy.
-- Entry/exit immediate cost is assigned to the selected action; between-book movement is assigned to legal `HOLD`/`WAIT` interval actions.
-- Fixed trade size remains `$1000` notional per entry; quantity is derived from the book-walked fill price.
 - The system contains no real-order pathway.

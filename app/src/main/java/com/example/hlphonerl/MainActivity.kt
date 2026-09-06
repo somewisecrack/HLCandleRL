@@ -138,13 +138,18 @@ private fun Dashboard(
                     listOf(
                         "Market" to state.market,
                         "Coin" to state.coin,
-                        "Mid" to "%.4f".format(state.mid),
-                        "Spread" to "%.3f bps".format(state.spreadBps),
+                        "Interval" to state.interval,
+                        "Close" to "%.4f".format(state.close),
+                        "Volume" to "%.2f".format(state.candleVolume),
                         "Position" to state.position,
+                        "Mark" to "%.4f".format(state.markPx),
+                        "Oracle" to "%.4f".format(state.oraclePx),
+                        "OI" to "%.2f".format(state.openInterest),
+                        "Premium" to "%.4f bps".format(state.premiumBps),
                         "HL taker" to "%.3f bps".format(state.crossFeeBps),
                         "Funding/hr" to "%.4f bps".format(state.fundingBpsPerHour),
-                        "L2 updates" to state.bookUpdates.toString(),
-                        "Book age" to "${state.bookAgeMs} ms"
+                        "Candles" to state.candleUpdates.toString(),
+                        "Candle age" to "${state.candleAgeMs} ms"
                     )
                 )
             }
@@ -180,7 +185,7 @@ private fun Dashboard(
             }
 
             Text(
-                "Virtual only. No private key. No real orders. Learns from HyperLiquid L2 book-walking simulated fills.",
+                "Virtual only. No private key. No real orders. Learns from HyperLiquid OHLCV candles plus public perp context.",
                 color = Muted,
                 style = MaterialTheme.typography.bodySmall,
                 modifier = Modifier.padding(bottom = 12.dp)
@@ -194,8 +199,8 @@ private fun Header(running: Boolean, status: String, onStart: () -> Unit, onStop
     Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
         Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
             Column(Modifier.weight(1f)) {
-                Text("HL Phone RL", color = Ink, style = MaterialTheme.typography.headlineMedium, fontWeight = FontWeight.Black)
-                Text("L2-only virtual reinforcement learner", color = Muted, style = MaterialTheme.typography.bodyMedium)
+                Text("HL Candle RL", color = Ink, style = MaterialTheme.typography.headlineMedium, fontWeight = FontWeight.Black)
+                Text("OHLCV + public perp-state RL learner", color = Muted, style = MaterialTheme.typography.bodyMedium)
             }
             StatusPill(running)
         }
