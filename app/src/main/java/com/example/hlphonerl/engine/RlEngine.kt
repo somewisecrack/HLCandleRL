@@ -45,6 +45,9 @@ class RlEngine(private val coin: String = "xyz:SP500") {
     private var ws: HyperLiquidWsClient? = null
     private var latestBook: L2Book? = null
     private var lastEquity: Double? = null
+    private var pendingState: FloatArray? = null
+    private var pendingAction: Int? = null
+    private var pendingDone: Boolean = false
     private var lastDecisionBookTimeMillis: Long = 0L
     private var stepNo: Long = 0
     private var persistenceDir: File? = null
@@ -84,8 +87,12 @@ class RlEngine(private val coin: String = "xyz:SP500") {
         replay.clear()
         latestBook = null
         lastEquity = null
+        pendingState = null
+        pendingAction = null
+        pendingDone = false
         lastDecisionBookTimeMillis = 0L
         stepNo = 0L
+        featureBuilder.reset()
         loadedReplay = true
         _state.value = EngineUiState(
             status = if (wasRunning) "learning reset; press Start" else "learning reset",
@@ -131,6 +138,10 @@ class RlEngine(private val coin: String = "xyz:SP500") {
             }
             latestBook = null
             lastDecisionBookTimeMillis = 0L
+            pendingState = null
+            pendingAction = null
+            pendingDone = false
+            featureBuilder.reset()
             _state.value = _state.value.copy(
                 status = "starting",
                 running = true,
@@ -163,25 +174,48 @@ class RlEngine(private val coin: String = "xyz:SP500") {
         if (book.timeMillis == lastDecisionBookTimeMillis) return
         lastDecisionBookTimeMillis = book.timeMillis
         stepNo++
-        val state = featureBuilder.build(book, broker.position, stepNo) ?: return
-        val mask = broker.validMask()
-        val actionIdx = learner.select(state, mask, explore = true)
-        val action = Action.entries[actionIdx]
+        val stateBeforeAction = featureBuilder.build(book, broker.position, stepNo) ?: return
+        val firstDecision = lastEquity == null
         val previousEquity = lastEquity ?: broker.equity(book)
-        val result0 = broker.step(action, book, stepNo)
-        val reward = result0.equity - previousEquity
-        lastEquity = result0.equity
-        val result = result0.copy(reward = reward)
 
-        val nextState = featureBuilder.build(book, broker.position, stepNo) ?: state
-        val transition = Transition(state, actionIdx, result.reward, nextState, broker.validMask(), broker.position == null && action == Action.EXIT)
-        replay.add(transition)
-        appendTransition(transition)
-        if (replay.size() >= 64) learner.train(replay.sample(32))
+        pendingState?.let { ps ->
+            pendingAction?.let { pa ->
+                val intervalReward = broker.equity(book) - previousEquity
+                val transition = Transition(ps, pa, intervalReward, stateBeforeAction, broker.validMask(), pendingDone)
+                replay.add(transition)
+                appendTransition(transition)
+                if (replay.size() >= 64) learner.train(replay.sample(32))
+            }
+        }
+
+        val mask = broker.validMask()
+        val actionIdx = learner.select(stateBeforeAction, mask, explore = true)
+        val action = Action.entries[actionIdx]
+        val result = broker.step(action, book, stepNo)
+        lastEquity = result.equity
+        val stateAfterAction = featureBuilder.patchPosition(stateBeforeAction, broker.position, stepNo)
+
+        if (result.reason.startsWith("enter") || result.reason == "exit" || result.reason == "forced_exit_max_hold") {
+            val effectiveIdx = result.action.ordinal
+            val transition = Transition(stateBeforeAction, effectiveIdx, result.reward, stateAfterAction, broker.validMask(), result.reason == "exit" || result.reason == "forced_exit_max_hold")
+            replay.add(transition)
+            appendTransition(transition)
+            if (replay.size() >= 64) learner.train(replay.sample(32))
+        }
+
+        if (firstDecision && broker.position == null && result.reason == "wait_flat") {
+            pendingState = null
+            pendingAction = null
+            pendingDone = false
+        } else {
+            pendingState = stateAfterAction
+            pendingAction = if (broker.position == null) Action.WAIT.ordinal else Action.HOLD.ordinal
+            pendingDone = false
+        }
 
         val mid = book.mid ?: 0.0
         val spreadBps = book.spread?.let { it / mid * 10_000.0 } ?: 0.0
-        val q = learner.qValues(state).joinToString(prefix = "[", postfix = "]") { "%.3f".format(it) }
+        val q = learner.qValues(stateBeforeAction).joinToString(prefix = "[", postfix = "]") { "%.3f".format(it) }
         _state.value = EngineUiState(
             status = "running",
             running = true,

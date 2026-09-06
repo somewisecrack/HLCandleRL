@@ -60,6 +60,19 @@ class L2FeatureBuilder(private val depth: Int = 5) {
         return out.toFloatArray()
     }
 
+    fun patchPosition(state: FloatArray, position: Position?, step: Long): FloatArray {
+        val out = state.copyOf()
+        out[out.size - 4] = when (position?.side) { Side.LONG -> 1f; Side.SHORT -> -1f; null -> 0f }
+        out[out.size - 3] = position?.let { ((step - it.entryStep).toDouble() / 300.0).clip(0.0, 5.0).toFloat() } ?: 0f
+        if (position == null) out[out.size - 2] = 0f
+        return out
+    }
+
+    fun reset() {
+        lastMid = null
+        lastImb = null
+    }
+
     private fun Double.clip(lo: Double, hi: Double) = coerceIn(lo, hi)
 }
 

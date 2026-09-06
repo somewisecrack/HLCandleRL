@@ -35,8 +35,8 @@ class HyperLiquidInfoClient {
         val meta = arr.getJSONObject(0)
         val ctxs = arr.getJSONArray(1)
         val universe = meta.getJSONArray("universe")
-        var funding = 0.0
-        var scale = 1.0
+        var funding: Double? = null
+        var scale: Double? = null
         val shortName = coin.substringAfter(":")
         for (i in 0 until universe.length()) {
             val asset = universe.getJSONObject(i)
@@ -47,11 +47,13 @@ class HyperLiquidInfoClient {
                 break
             }
         }
+        val resolvedFunding = funding ?: error("selected asset $coin not found in HyperLiquid metaAndAssetCtxs")
+        val resolvedScale = scale ?: error("selected asset $coin not found in HyperLiquid metaAndAssetCtxs")
         return HyperLiquidCosts(
-            crossFeeRate = baseCross * scale,
-            addFeeRate = baseAdd * scale,
-            fundingRateHourly = funding,
-            source = "hyperliquid_info:userFees+metaAndAssetCtxs coin=$coin deployerFeeScale=$scale"
+            crossFeeRate = baseCross * resolvedScale,
+            addFeeRate = baseAdd * resolvedScale,
+            fundingRateHourly = resolvedFunding,
+            source = "hyperliquid_info:userFees+metaAndAssetCtxs coin=$coin deployerFeeScale=$resolvedScale"
         )
     }
 

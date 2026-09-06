@@ -17,6 +17,7 @@ class RlForegroundService : Service() {
     private val engine = AppRuntime.engine
     private var notificationJob: Job? = null
     private var lastSavedUpdates = -1
+    private var skipSaveOnDestroy = false
 
     override fun onCreate() {
         super.onCreate()
@@ -42,7 +43,7 @@ class RlForegroundService : Service() {
     override fun onBind(intent: Intent?): IBinder? = null
 
     override fun onDestroy() {
-        saveLearningState(compactReplay = true)
+        if (!skipSaveOnDestroy) saveLearningState(compactReplay = true)
         notificationJob?.cancel()
         scope.cancel()
         engine.stop()
@@ -71,8 +72,10 @@ class RlForegroundService : Service() {
     }
 
     private fun resetLearner() {
+        skipSaveOnDestroy = true
         engine.attachPersistenceDir(filesDir.resolve("learning_state"))
         notificationJob?.cancel()
+        getSharedPreferences(PREFS, MODE_PRIVATE).edit().remove(KEY_POLICY_JSON).apply()
         engine.resetLearning()
         stopForeground(STOP_FOREGROUND_REMOVE)
         stopSelf()
