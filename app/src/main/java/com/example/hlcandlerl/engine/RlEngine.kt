@@ -178,9 +178,10 @@ class RlEngine(
         if (_state.value.running || decisionJob != null) return
         _state.value = _state.value.copy(status = "loading HyperLiquid costs/context", running = false)
         decisionJob = scope.launch {
+            lateinit var history: List<Candle>
             try {
                 val costs = withContext(Dispatchers.IO) { infoClient.loadCostsAndContext(coin) }
-                val history = withContext(Dispatchers.IO) { infoClient.loadRecentCandles(coin, interval) }
+                history = withContext(Dispatchers.IO) { infoClient.loadRecentCandles(coin, interval) }
                 broker.setCosts(costs.crossFeeRate, costs.addFeeRate, costs.fundingRateHourly, costs.source)
                 context = costs.context
             } catch (e: Exception) {

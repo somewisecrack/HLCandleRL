@@ -92,8 +92,9 @@ class RlForegroundService : Service() {
     private fun saveLearningState(compactReplay: Boolean) {
         try {
             val target = engine.policyFile() ?: return
-            target.parentFile?.mkdirs()
-            val tmp = target.parentFile.resolve("policy.json.tmp")
+            val parent = target.parentFile ?: return
+            parent.mkdirs()
+            val tmp = parent.resolve("policy.json.tmp")
             tmp.writeText(engine.exportPolicyJson())
             if (!tmp.renameTo(target)) {
                 target.delete()
