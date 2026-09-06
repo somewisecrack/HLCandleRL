@@ -1,6 +1,6 @@
-package com.example.hlphonerl.exchange
+package com.example.hlcandlerl.exchange
 
-import com.example.hlphonerl.data.Candle
+import com.example.hlcandlerl.data.Candle
 import okhttp3.*
 import org.json.JSONObject
 

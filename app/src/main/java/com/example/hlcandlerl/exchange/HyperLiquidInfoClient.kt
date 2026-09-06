@@ -1,6 +1,7 @@
-package com.example.hlphonerl.exchange
+package com.example.hlcandlerl.exchange
 
-import com.example.hlphonerl.data.PerpContext
+import com.example.hlcandlerl.data.Candle
+import com.example.hlcandlerl.data.PerpContext
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
 import okhttp3.Request
@@ -40,6 +41,34 @@ class HyperLiquidInfoClient {
     }
 
     fun loadContext(coin: String): PerpContext = loadPerpAsset(coin).context
+
+    fun loadRecentCandles(coin: String, interval: String = "1m", lookbackMillis: Long = 3_600_000L): List<Candle> {
+        val now = System.currentTimeMillis()
+        val payload = JSONObject()
+            .put("type", "candleSnapshot")
+            .put("req", JSONObject()
+                .put("coin", coin)
+                .put("interval", interval)
+                .put("startTime", now - lookbackMillis)
+                .put("endTime", now))
+        val arr = org.json.JSONArray(postText(payload))
+        return List(arr.length()) { i -> parseCandle(arr.getJSONObject(i), coin, interval) }
+            .filter { it.open > 0.0 && it.high >= it.low && it.close > 0.0 }
+            .sortedBy { it.openTimeMillis }
+    }
+
+    private fun parseCandle(d: JSONObject, coin: String, interval: String): Candle = Candle(
+        coin = d.optString("s", coin),
+        interval = d.optString("i", interval),
+        openTimeMillis = d.getLong("t"),
+        closeTimeMillis = d.optLong("T", d.getLong("t")),
+        open = d.getString("o").toDouble(),
+        high = d.getString("h").toDouble(),
+        low = d.getString("l").toDouble(),
+        close = d.getString("c").toDouble(),
+        volume = d.getString("v").toDouble(),
+        trades = d.optInt("n", 0)
+    )
 
     private fun loadPerpAsset(coin: String): AssetContext {
         val dex = coin.substringBefore(":", missingDelimiterValue = "")

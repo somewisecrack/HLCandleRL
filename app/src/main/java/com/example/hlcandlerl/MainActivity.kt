@@ -1,4 +1,4 @@
-package com.example.hlphonerl
+package com.example.hlcandlerl
 
 import android.Manifest
 import android.content.Intent
@@ -21,8 +21,8 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
-import com.example.hlphonerl.engine.AppRuntime
-import com.example.hlphonerl.engine.RlForegroundService
+import com.example.hlcandlerl.engine.AppRuntime
+import com.example.hlcandlerl.engine.RlForegroundService
 
 private val Ink = Color(0xFFE9EEF7)
 private val Muted = Color(0xFF8F9BAE)
@@ -82,7 +82,7 @@ class MainActivity : ComponentActivity() {
 
 @Composable
 private fun Dashboard(
-    state: com.example.hlphonerl.engine.EngineUiState,
+    state: com.example.hlcandlerl.engine.EngineUiState,
     onStart: () -> Unit,
     onStop: () -> Unit,
     onReset: () -> Unit,

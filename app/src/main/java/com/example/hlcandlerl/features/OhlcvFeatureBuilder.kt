@@ -1,14 +1,19 @@
-package com.example.hlphonerl.features
+package com.example.hlcandlerl.features
 
-import com.example.hlphonerl.data.Candle
-import com.example.hlphonerl.data.MarketFrame
-import com.example.hlphonerl.data.Position
-import com.example.hlphonerl.data.Side
+import com.example.hlcandlerl.data.Candle
+import com.example.hlcandlerl.data.MarketFrame
+import com.example.hlcandlerl.data.Position
+import com.example.hlcandlerl.data.Side
 import kotlin.math.ln
 
 class OhlcvFeatureBuilder(private val window: Int = 32) {
     private val candles = ArrayDeque<Candle>()
     val featureSize: Int = window * 7 + 7 + 4
+
+    fun seed(history: List<Candle>) {
+        candles.clear()
+        history.sortedBy { it.openTimeMillis }.takeLast(window).forEach { candles.addLast(it) }
+    }
 
     fun add(frame: MarketFrame) {
         val c = frame.candle

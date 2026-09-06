@@ -1,4 +1,4 @@
-package com.example.hlphonerl.engine
+package com.example.hlcandlerl.engine
 
 import android.app.Notification
 import android.app.NotificationChannel
@@ -9,7 +9,7 @@ import android.content.Intent
 import android.os.Build
 import android.os.IBinder
 import androidx.core.app.NotificationCompat
-import com.example.hlphonerl.R
+import com.example.hlcandlerl.R
 import kotlinx.coroutines.*
 
 class RlForegroundService : Service() {
@@ -151,9 +151,9 @@ class RlForegroundService : Service() {
     }
 
     companion object {
-        const val ACTION_START = "com.example.hlphonerl.START_LEARNER"
-        const val ACTION_STOP = "com.example.hlphonerl.STOP_LEARNER"
-        const val ACTION_RESET = "com.example.hlphonerl.RESET_LEARNING"
+        const val ACTION_START = "com.example.hlcandlerl.START_LEARNER"
+        const val ACTION_STOP = "com.example.hlcandlerl.STOP_LEARNER"
+        const val ACTION_RESET = "com.example.hlcandlerl.RESET_LEARNING"
         private const val CHANNEL_ID = "hl_phone_rl_learner"
         private const val NOTIFICATION_ID = 42
         private const val PREFS = "hl_phone_rl_policy"

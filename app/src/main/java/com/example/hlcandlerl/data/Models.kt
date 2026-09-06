@@ -1,4 +1,4 @@
-package com.example.hlphonerl.data
+package com.example.hlcandlerl.data
 
 data class Candle(
     val coin: String,

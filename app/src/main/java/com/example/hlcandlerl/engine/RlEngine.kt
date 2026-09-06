@@ -1,11 +1,11 @@
-package com.example.hlphonerl.engine
+package com.example.hlcandlerl.engine
 
-import com.example.hlphonerl.broker.VirtualPerpBroker
-import com.example.hlphonerl.data.*
-import com.example.hlphonerl.exchange.HyperLiquidCandleWsClient
-import com.example.hlphonerl.exchange.HyperLiquidInfoClient
-import com.example.hlphonerl.features.OhlcvFeatureBuilder
-import com.example.hlphonerl.rl.*
+import com.example.hlcandlerl.broker.VirtualPerpBroker
+import com.example.hlcandlerl.data.*
+import com.example.hlcandlerl.exchange.HyperLiquidCandleWsClient
+import com.example.hlcandlerl.exchange.HyperLiquidInfoClient
+import com.example.hlcandlerl.features.OhlcvFeatureBuilder
+import com.example.hlcandlerl.rl.*
 import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -65,6 +65,8 @@ class RlEngine(
     private var pendingAction: Int? = null
     private var pendingDone: Boolean = false
     private var lastDecisionCandleTimeMillis: Long = 0L
+    private var lastDecisionFrameKey: String = ""
+    private var lastSeenFrameKey: String = ""
     private var stepNo: Long = 0
     private var persistenceDir: File? = null
     private var replayAppendFile: File? = null
@@ -141,14 +143,16 @@ class RlEngine(
         )
     }
 
-    private fun clearRuntime() {
+    private fun clearRuntime(clearContext: Boolean = true) {
         latestCandle = null
-        context = PerpContext()
+        if (clearContext) context = PerpContext()
         lastEquity = null
         pendingState = null
         pendingAction = null
         pendingDone = false
         lastDecisionCandleTimeMillis = 0L
+        lastDecisionFrameKey = ""
+        lastSeenFrameKey = ""
         stepNo = 0L
         candleUpdates = 0L
         lastCandleWallMillis = 0L
@@ -176,6 +180,7 @@ class RlEngine(
         decisionJob = scope.launch {
             try {
                 val costs = withContext(Dispatchers.IO) { infoClient.loadCostsAndContext(coin) }
+                val history = withContext(Dispatchers.IO) { infoClient.loadRecentCandles(coin, interval) }
                 broker.setCosts(costs.crossFeeRate, costs.addFeeRate, costs.fundingRateHourly, costs.source)
                 context = costs.context
             } catch (e: Exception) {
@@ -188,7 +193,8 @@ class RlEngine(
                 decisionJob = null
                 return@launch
             }
-            clearRuntime()
+            clearRuntime(clearContext = false)
+            featureBuilder.seed(history)
             _state.value = _state.value.copy(
                 status = "starting",
                 running = true,
@@ -200,10 +206,14 @@ class RlEngine(
                 coin = coin,
                 interval = interval,
                 onCandle = {
-                    if (it.coin == coin && it.openTimeMillis > lastDecisionCandleTimeMillis) {
-                        latestCandle = it
-                        candleUpdates += 1
-                        lastCandleWallMillis = System.currentTimeMillis()
+                    if (it.coin == coin) {
+                        val key = candleKey(it)
+                        if (key != lastSeenFrameKey) {
+                            latestCandle = it
+                            lastSeenFrameKey = key
+                            candleUpdates += 1
+                            lastCandleWallMillis = System.currentTimeMillis()
+                        }
                     }
                 },
                 onStatus = { s -> _state.value = _state.value.copy(status = s) }
@@ -225,7 +235,9 @@ class RlEngine(
 
     private suspend fun tick() {
         val candle = latestCandle ?: return
-        if (candle.openTimeMillis == lastDecisionCandleTimeMillis) return
+        val key = candleKey(candle)
+        if (key == lastDecisionFrameKey) return
+        lastDecisionFrameKey = key
         lastDecisionCandleTimeMillis = candle.openTimeMillis
         stepNo++
         if (stepNo % 60L == 0L) {
@@ -302,6 +314,8 @@ class RlEngine(
             costSource = broker.costSource
         )
     }
+
+    private fun candleKey(c: Candle): String = "${c.openTimeMillis}:${c.close}:${c.high}:${c.low}:${c.volume}:${c.trades}"
 
     private fun appendTransition(t: Transition) {
         try { replayAppendFile?.appendText(t.toJsonLine() + "\n") }

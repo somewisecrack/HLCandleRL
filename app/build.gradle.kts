@@ -4,11 +4,11 @@ plugins {
 }
 
 android {
-    namespace = "com.example.hlphonerl"
+    namespace = "com.example.hlcandlerl"
     compileSdk = 35
 
     defaultConfig {
-        applicationId = "com.example.hlphonerl"
+        applicationId = "com.example.hlcandlerl"
         minSdk = 26
         targetSdk = 35
         versionCode = 1
