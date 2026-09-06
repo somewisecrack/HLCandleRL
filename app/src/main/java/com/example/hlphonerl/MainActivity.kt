@@ -127,7 +127,9 @@ private fun Dashboard(
                         "Coin" to state.coin,
                         "Mid" to "%.4f".format(state.mid),
                         "Spread" to "%.3f bps".format(state.spreadBps),
-                        "Position" to state.position
+                        "Position" to state.position,
+                        "HL taker" to "%.3f bps".format(state.crossFeeBps),
+                        "Funding/hr" to "%.4f bps".format(state.fundingBpsPerHour)
                     )
                 )
             }
@@ -137,6 +139,7 @@ private fun Dashboard(
                 BodyText(state.policy)
                 Spacer(Modifier.height(6.dp))
                 BodyText(state.learningRule)
+                BodyText("Costs: ${state.costSource}")
                 Spacer(Modifier.height(12.dp))
                 MetricGrid(
                     listOf(

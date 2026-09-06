@@ -37,6 +37,7 @@ This app intentionally does **not** do the following:
 The current app contains:
 
 - HyperLiquid public WebSocket client for `l2Book`.
+- HyperLiquid public `/info` cost loader for fee schedule and selected-market funding.
 - Top-5 L2 order-book feature builder.
 - Virtual perp broker.
 - L2 book-walking virtual marketable fills.
@@ -162,6 +163,8 @@ Holding:
 
 This follows the same safety principle used in OptionScalper: operational constraints should be enforced by masks, not learned through punishment.
 
+The engine acts only once per fresh L2 book timestamp; it does not repeatedly train on stale snapshots.
+
 ---
 
 ## Reward
@@ -176,8 +179,11 @@ Virtual equity includes:
 
 - realized cash PnL
 - mark-to-executable liquidation value using current bid/ask
-- taker fees
+- HyperLiquid public `/info` market-crossing fee rate
+- HyperLiquid public `/info` selected-market funding rate
 - simulated slippage from walking the visible L2 book
+
+The app refuses to start training if HyperLiquid public cost data cannot be loaded. It does not fall back to zero or synthetic fees.
 
 Marketable virtual orders are simulated as:
 

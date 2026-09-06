@@ -2,6 +2,7 @@ package com.example.hlphonerl.engine
 
 import com.example.hlphonerl.broker.VirtualPerpBroker
 import com.example.hlphonerl.data.*
+import com.example.hlphonerl.exchange.HyperLiquidInfoClient
 import com.example.hlphonerl.exchange.HyperLiquidWsClient
 import com.example.hlphonerl.features.L2FeatureBuilder
 import com.example.hlphonerl.rl.*
@@ -27,7 +28,10 @@ import java.io.File
     val replay: Int = 0,
     val updates: Int = 0,
     val epsilon: Double = 0.0,
-    val qValues: String = ""
+    val qValues: String = "",
+    val crossFeeBps: Double = 0.0,
+    val fundingBpsPerHour: Double = 0.0,
+    val costSource: String = "not_loaded"
 )
 
 class RlEngine(private val coin: String = "xyz:SP500") {
@@ -35,12 +39,13 @@ class RlEngine(private val coin: String = "xyz:SP500") {
     private var decisionJob: Job? = null
     private val featureBuilder = L2FeatureBuilder(depth = 5)
     private val broker = VirtualPerpBroker()
+    private val infoClient = HyperLiquidInfoClient()
     private val learner = MaskedDoubleQLearner(inputDim = featureBuilder.featureSize)
     private val replay = ReplayBuffer()
     private var ws: HyperLiquidWsClient? = null
     private var latestBook: L2Book? = null
-    private var lastState: FloatArray? = null
-    private var lastAction: Int? = null
+    private var lastEquity: Double? = null
+    private var lastDecisionBookTimeMillis: Long = 0L
     private var stepNo: Long = 0
     private var persistenceDir: File? = null
     private var replayAppendFile: File? = null
@@ -78,14 +83,36 @@ class RlEngine(private val coin: String = "xyz:SP500") {
 
     fun start() {
         loadReplayOnce()
-        if (_state.value.running) return
-        _state.value = _state.value.copy(status = "starting", running = true)
-        ws = HyperLiquidWsClient(
-            coin = coin,
-            onBook = { latestBook = it },
-            onStatus = { s -> _state.value = _state.value.copy(status = s) }
-        ).also { it.connect() }
+        if (_state.value.running || decisionJob != null) return
+        _state.value = _state.value.copy(status = "loading HyperLiquid costs", running = false)
         decisionJob = scope.launch {
+            try {
+                val costs = withContext(Dispatchers.IO) { infoClient.loadCosts(coin) }
+                broker.setCosts(costs.crossFeeRate, costs.addFeeRate, costs.fundingRateHourly, costs.source)
+            } catch (e: Exception) {
+                _state.value = _state.value.copy(status = "cost load failed: ${e.javaClass.simpleName}; refusing to train", running = false)
+                decisionJob = null
+                return@launch
+            }
+            if (!broker.costsLoaded) {
+                _state.value = _state.value.copy(status = "cost load failed; refusing to train", running = false)
+                decisionJob = null
+                return@launch
+            }
+            latestBook = null
+            lastDecisionBookTimeMillis = 0L
+            _state.value = _state.value.copy(
+                status = "starting",
+                running = true,
+                crossFeeBps = broker.crossFeeRate * 10_000.0,
+                fundingBpsPerHour = broker.fundingRateHourly * 10_000.0,
+                costSource = broker.costSource
+            )
+            ws = HyperLiquidWsClient(
+                coin = coin,
+                onBook = { latestBook = it },
+                onStatus = { s -> _state.value = _state.value.copy(status = s) }
+            ).also { it.connect() }
             while (isActive) {
                 tick()
                 delay(1000)
@@ -103,24 +130,24 @@ class RlEngine(private val coin: String = "xyz:SP500") {
 
     private fun tick() {
         val book = latestBook ?: return
+        if (book.timeMillis == lastDecisionBookTimeMillis) return
+        lastDecisionBookTimeMillis = book.timeMillis
         stepNo++
         val state = featureBuilder.build(book, broker.position, stepNo) ?: return
         val mask = broker.validMask()
         val actionIdx = learner.select(state, mask, explore = true)
         val action = Action.entries[actionIdx]
-        val result = broker.step(action, book, stepNo)
+        val previousEquity = lastEquity ?: broker.equity(book)
+        val result0 = broker.step(action, book, stepNo)
+        val reward = result0.equity - previousEquity
+        lastEquity = result0.equity
+        val result = result0.copy(reward = reward)
 
         val nextState = featureBuilder.build(book, broker.position, stepNo) ?: state
-        lastState?.let { prev ->
-            lastAction?.let { a ->
-                val transition = Transition(prev, a, result.reward, nextState, broker.validMask(), broker.position == null && action == Action.EXIT)
-                replay.add(transition)
-                appendTransition(transition)
-            }
-        }
+        val transition = Transition(state, actionIdx, result.reward, nextState, broker.validMask(), broker.position == null && action == Action.EXIT)
+        replay.add(transition)
+        appendTransition(transition)
         if (replay.size() >= 64) learner.train(replay.sample(32))
-        lastState = nextState
-        lastAction = actionIdx
 
         val mid = book.mid ?: 0.0
         val spreadBps = book.spread?.let { it / mid * 10_000.0 } ?: 0.0
@@ -140,7 +167,10 @@ class RlEngine(private val coin: String = "xyz:SP500") {
             replay = replay.size(),
             updates = learner.updates,
             epsilon = learner.epsilon,
-            qValues = q
+            qValues = q,
+            crossFeeBps = broker.crossFeeRate * 10_000.0,
+            fundingBpsPerHour = broker.fundingRateHourly * 10_000.0,
+            costSource = broker.costSource
         )
     }
 
