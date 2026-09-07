@@ -17,8 +17,9 @@ filesDir/learning_state/ETH/
 ## Files
 
 ```text
-policy.json   # Double-Q weights, epsilon, update count for that market
-replay.jsonl  # durable replay transitions for that market, one JSON object per line
+policy.json       # Double-Q weights, epsilon, update count for that market
+replay.jsonl      # durable replay transitions for that market, one JSON object per line
+candles_1m.jsonl  # downloaded offline-training candles for that market
 ```
 
 ## Guarantees
@@ -27,7 +28,8 @@ replay.jsonl  # durable replay transitions for that market, one JSON object per 
 - Policy weights are checkpointed every 100 learner updates.
 - Replay is compacted every 500 updates and on clean Stop/service destruction.
 - On service start, the selected market's policy and replay are restored before the learner resumes.
-- Switching markets while stopped repoints policy/replay files and does not reuse another market's state.
+- Switching markets while stopped repoints policy/replay/candle files and does not reuse another market's state.
+- Downloaded candle data can be deleted from the UI without deleting policy/replay.
 
 ## Reset behavior
 
@@ -45,6 +47,23 @@ Reset is a hard reset for the currently selected market:
 - suppresses the foreground service's normal on-destroy save so reset files are not immediately recreated
 
 The app remains stopped after reset. Press Start to begin a new run.
+
+## Downloaded data deletion
+
+The **Delete downloaded candle data** button removes only:
+
+```text
+candles_1m.jsonl
+```
+
+It does not delete:
+
+```text
+policy.json
+replay.jsonl
+```
+
+Use Reset if you want to archive policy/replay too.
 
 ## What survives
 

@@ -112,6 +112,8 @@ The app contains:
 - Causal replay transitions aligned to future candle frames.
 - Phone-friendly masked Double-Q learner with linear function approximation.
 - Market-specific policy/replay persistence.
+- On-phone offline training using downloaded historical candles.
+- Download/delete controls for local candle data.
 - Android foreground service for background/screen-off operation.
 - Reset button to archive active replay/policy and clear runtime state.
 - Compose UI showing market, candle, context, PnL, reward, replay, epsilon, and Q-values.
@@ -166,6 +168,32 @@ The transition logic is causal:
 
 ---
 
+## Offline training
+
+The app can train offline on the phone itself:
+
+1. Tap **Download 7d** to fetch recent `1m` candles for the selected market using HyperLiquid `/info` `candleSnapshot`.
+2. Tap **Offline train** to replay the stored candles chronologically through the same virtual broker/RL loop.
+3. Watch the offline report after each round:
+
+```text
+trainEq
+reward
+positive/negative rewards
+entry/exit count
+max drawdown
+```
+
+The same stored candle file can be reused for multiple offline training rounds. Tap **Delete downloaded candle data** to remove it from phone storage without resetting policy/replay.
+
+Offline data path:
+
+```text
+filesDir/learning_state/<safe_coin>/candles_1m.jsonl
+```
+
+Historical offline training currently uses OHLCV candles and current/public perp context loaded at training start. It does not use future data inside a chronological replay.
+
 ## Persistence
 
 Market-specific app-private paths:
@@ -207,9 +235,9 @@ Command-line Gradle builds require a configured JDK. This shell previously could
 
 ## Roadmap
 
-- Add Android unit tests for candle parsing, reward alignment, reset, and broker accounting.
+- Add Android unit tests for candle parsing, reward alignment, reset, offline training, and broker accounting.
 - Add bounded replay loading instead of reading full JSONL into memory.
-- Add offline candle replay/backtest mode.
+- Add train/validation split for downloaded candles.
 - Add baseline policies: always-wait, random-valid, frozen-policy.
 - Upgrade from linear Double-Q to a small neural DQN/TFLite model if offline validation justifies it.
 - Add optional position sizing only after entry/exit technique works.

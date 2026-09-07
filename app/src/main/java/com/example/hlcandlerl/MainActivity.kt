@@ -54,13 +54,17 @@ class MainActivity : ComponentActivity() {
                 )
             ) {
                 val e = AppRuntime.engine
+                LaunchedEffect(Unit) { e.attachPersistenceDir(filesDir.resolve("learning_state")) }
                 val state by e.state.collectAsState()
                 Dashboard(
                     state = state,
                     onStart = { startLearnerService() },
                     onStop = { stopLearnerService() },
                     onReset = { resetLearnerService() },
-                    onMarketChange = { e.setMarket(it) }
+                    onMarketChange = { e.setMarket(it) },
+                    onDownload = { e.downloadOfflineCandles(days = 7) },
+                    onOfflineTrain = { e.offlineTrain(rounds = 5) },
+                    onDeleteData = { e.deleteDownloadedData() }
                 )
             }
         }
@@ -86,7 +90,10 @@ private fun Dashboard(
     onStart: () -> Unit,
     onStop: () -> Unit,
     onReset: () -> Unit,
-    onMarketChange: (String) -> Unit
+    onMarketChange: (String) -> Unit,
+    onDownload: () -> Unit,
+    onOfflineTrain: () -> Unit,
+    onDeleteData: () -> Unit
 ) {
     val pnlColor = when {
         state.equity > 0 -> Green
@@ -150,6 +157,31 @@ private fun Dashboard(
                         "Funding/hr" to "%.4f bps".format(state.fundingBpsPerHour),
                         "Candles" to state.candleUpdates.toString(),
                         "Candle age" to "${state.candleAgeMs} ms"
+                    )
+                )
+            }
+
+            CardPanel {
+                SectionTitle("Offline training")
+                BodyText("Download candles once, train multiple rounds locally on the phone, or delete downloaded data to free storage.")
+                Spacer(Modifier.height(8.dp))
+                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    OutlinedButton(onClick = onDownload, enabled = !state.running, modifier = Modifier.weight(1f), shape = RoundedCornerShape(14.dp)) { Text("Download 7d") }
+                    Button(onClick = onOfflineTrain, enabled = !state.running, modifier = Modifier.weight(1f), shape = RoundedCornerShape(14.dp)) { Text("Offline train") }
+                }
+                OutlinedButton(
+                    onClick = onDeleteData,
+                    enabled = !state.running,
+                    modifier = Modifier.fillMaxWidth(),
+                    shape = RoundedCornerShape(14.dp),
+                    colors = ButtonDefaults.outlinedButtonColors(contentColor = Amber)
+                ) { Text("Delete downloaded candle data") }
+                Spacer(Modifier.height(8.dp))
+                MetricGrid(
+                    listOf(
+                        "Stored candles" to state.offlineCandles.toString(),
+                        "Offline round" to state.offlineRound.toString(),
+                        "Report" to state.offlineReport.ifBlank { "—" }
                     )
                 )
             }

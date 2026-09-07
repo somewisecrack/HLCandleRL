@@ -9,6 +9,7 @@ import com.example.hlcandlerl.rl.*
 import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
+import org.json.JSONObject
 import java.io.File
 
  data class EngineUiState(
@@ -40,7 +41,10 @@ import java.io.File
     val premiumBps: Double = 0.0,
     val markPx: Double = 0.0,
     val oraclePx: Double = 0.0,
-    val costSource: String = "not_loaded"
+    val costSource: String = "not_loaded",
+    val offlineCandles: Int = 0,
+    val offlineRound: Int = 0,
+    val offlineReport: String = ""
 )
 
 class RlEngine(
@@ -49,6 +53,7 @@ class RlEngine(
 ) {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
     private var decisionJob: Job? = null
+    private var offlineJob: Job? = null
     private var marketLabel: String = defaultMarketLabel
     private var coin: String = markets.getValue(defaultMarketLabel)
     private val interval = "1m"
@@ -70,6 +75,7 @@ class RlEngine(
     private var stepNo: Long = 0
     private var persistenceDir: File? = null
     private var replayAppendFile: File? = null
+    private var candleDataFile: File? = null
     private var loadedReplay = false
     private var persistenceRoot: File? = null
     private var candleUpdates: Long = 0L
@@ -104,10 +110,75 @@ class RlEngine(
         val safe = coin.replace(Regex("[^A-Za-z0-9_.-]"), "_")
         persistenceDir = File(root, safe).also { it.mkdirs() }
         replayAppendFile = File(persistenceDir, "replay.jsonl")
+        candleDataFile = File(persistenceDir, "candles_${interval}.jsonl")
     }
 
     fun policyFile(): File? = persistenceDir?.let { File(it, "policy.json") }
     fun exportPolicyJson(): String = learner.snapshotJson()
+
+    fun downloadOfflineCandles(days: Int = 7) {
+        if (_state.value.running || decisionJob != null || offlineJob != null) return
+        offlineJob = scope.launch {
+            _state.value = _state.value.copy(status = "downloading ${days}d candles")
+            try {
+                val candles = withContext(Dispatchers.IO) { infoClient.loadRecentCandles(coin, interval, days * 24L * 3_600_000L) }
+                val file = candleDataFile ?: return@launch
+                withContext(Dispatchers.IO) {
+                    file.parentFile?.mkdirs()
+                    file.writeText(candles.joinToString("\n", postfix = "\n") { candleToJson(it).toString() })
+                }
+                _state.value = _state.value.copy(status = "downloaded ${candles.size} candles", offlineCandles = candles.size)
+            } catch (e: Exception) {
+                _state.value = _state.value.copy(status = "download failed: ${e.javaClass.simpleName}")
+            } finally { offlineJob = null }
+        }
+    }
+
+    fun deleteDownloadedData() {
+        if (_state.value.running || decisionJob != null || offlineJob != null) return
+        val deleted = candleDataFile?.takeIf { it.exists() }?.delete() == true
+        _state.value = _state.value.copy(
+            status = if (deleted) "downloaded candle data deleted" else "no downloaded candle data",
+            offlineCandles = 0,
+            offlineRound = 0,
+            offlineReport = ""
+        )
+    }
+
+    fun offlineTrain(rounds: Int = 5) {
+        if (_state.value.running || decisionJob != null || offlineJob != null) return
+        offlineJob = scope.launch {
+            val candles = withContext(Dispatchers.IO) { loadStoredCandles() }
+            if (candles.size < 40) {
+                _state.value = _state.value.copy(status = "need downloaded candles first", offlineCandles = candles.size)
+                offlineJob = null
+                return@launch
+            }
+            try {
+                val costs = withContext(Dispatchers.IO) { infoClient.loadCostsAndContext(coin) }
+                broker.setCosts(costs.crossFeeRate, costs.addFeeRate, costs.fundingRateHourly, costs.source)
+                context = costs.context
+            } catch (e: Exception) {
+                _state.value = _state.value.copy(status = "cost/context load failed: ${e.javaClass.simpleName}; refusing offline train")
+                offlineJob = null
+                return@launch
+            }
+            repeat(rounds) { idx ->
+                val report = runOfflineEpoch(candles)
+                _state.value = _state.value.copy(
+                    status = "offline round ${idx + 1}/$rounds complete",
+                    offlineCandles = candles.size,
+                    offlineRound = idx + 1,
+                    offlineReport = report,
+                    replay = replay.size(),
+                    updates = learner.updates,
+                    epsilon = learner.epsilon
+                )
+                savePolicyBestEffort()
+            }
+            offlineJob = null
+        }
+    }
     fun importPolicyJson(json: String) {
         learner.restoreJson(json)
         _state.value = _state.value.copy(updates = learner.updates, epsilon = learner.epsilon, status = "policy restored")
@@ -178,7 +249,7 @@ class RlEngine(
         if (_state.value.running || decisionJob != null) return
         _state.value = _state.value.copy(status = "loading HyperLiquid costs/context", running = false)
         decisionJob = scope.launch {
-            lateinit var history: List<Candle>
+            var history: List<Candle> = emptyList()
             try {
                 val costs = withContext(Dispatchers.IO) { infoClient.loadCostsAndContext(coin) }
                 history = withContext(Dispatchers.IO) { infoClient.loadRecentCandles(coin, interval) }
@@ -315,6 +386,97 @@ class RlEngine(
             costSource = broker.costSource
         )
     }
+
+    private fun runOfflineEpoch(candles: List<Candle>): String {
+        broker.reset()
+        featureBuilder.reset()
+        lastEquity = null
+        pendingState = null
+        pendingAction = null
+        pendingDone = false
+        stepNo = 0L
+        var rewardSum = 0.0
+        var positive = 0
+        var negative = 0
+        var entries = 0
+        var exits = 0
+        var peak = 0.0
+        var maxDrawdown = 0.0
+        for (c in candles) {
+            stepNo++
+            val frame = MarketFrame(c, context.copy(markPx = c.close.takeIf { context.markPx <= 0.0 } ?: context.markPx))
+            val stateBefore = featureBuilder.build(frame, broker.position, stepNo) ?: continue
+            val first = lastEquity == null
+            val prevEq = lastEquity ?: broker.equity(frame)
+            pendingState?.let { ps ->
+                pendingAction?.let { pa ->
+                    val r = broker.equity(frame) - prevEq
+                    rewardSum += r
+                    if (r > 0) positive++ else if (r < 0) negative++
+                    val t = Transition(ps, pa, r, stateBefore, broker.validMask(), pendingDone)
+                    replay.add(t); appendTransition(t)
+                    if (replay.size() >= 64) learner.train(replay.sample(32))
+                }
+            }
+            val actionIdx = learner.select(stateBefore, broker.validMask(), explore = true)
+            val result = broker.step(Action.entries[actionIdx], frame, stepNo)
+            lastEquity = result.equity
+            val stateAfter = featureBuilder.patchPosition(stateBefore, broker.position, stepNo)
+            if (result.reason.startsWith("enter") || result.reason == "exit" || result.reason == "forced_exit_max_hold") {
+                if (result.reason.startsWith("enter")) entries++ else exits++
+                rewardSum += result.reward
+                if (result.reward > 0) positive++ else if (result.reward < 0) negative++
+                val t = Transition(stateBefore, result.action.ordinal, result.reward, stateAfter, broker.validMask(), result.reason == "exit" || result.reason == "forced_exit_max_hold")
+                replay.add(t); appendTransition(t)
+                if (replay.size() >= 64) learner.train(replay.sample(32))
+            }
+            if (first && broker.position == null && result.reason == "wait_flat") {
+                pendingState = null; pendingAction = null; pendingDone = false
+            } else {
+                pendingState = stateAfter
+                pendingAction = if (broker.position == null) Action.WAIT.ordinal else Action.HOLD.ordinal
+                pendingDone = false
+            }
+            val eq = broker.equity(frame)
+            if (eq > peak) peak = eq
+            val dd = eq - peak
+            if (dd < maxDrawdown) maxDrawdown = dd
+        }
+        val finalEq = candles.lastOrNull()?.let { broker.equity(MarketFrame(it, context)) } ?: 0.0
+        return "trainEq ${"%+.2f".format(finalEq)} reward ${"%+.2f".format(rewardSum)} +$positive/-$negative trades $entries/$exits maxDD ${"%.2f".format(maxDrawdown)}"
+    }
+
+    private fun savePolicyBestEffort() {
+        try {
+            val target = policyFile() ?: return
+            val parent = target.parentFile ?: return
+            parent.mkdirs()
+            val tmp = parent.resolve("policy.json.tmp")
+            tmp.writeText(exportPolicyJson())
+            if (!tmp.renameTo(target)) { target.delete(); tmp.renameTo(target) }
+        } catch (_: Exception) { }
+    }
+
+    private fun loadStoredCandles(): List<Candle> {
+        val file = candleDataFile ?: return emptyList()
+        if (!file.exists()) return emptyList()
+        return file.readLines().mapNotNull { line ->
+            if (line.isBlank()) null else try { candleFromJson(JSONObject(line)) } catch (_: Exception) { null }
+        }.sortedBy { it.openTimeMillis }
+    }
+
+    private fun candleToJson(c: Candle): JSONObject = JSONObject()
+        .put("coin", c.coin).put("interval", c.interval)
+        .put("openTimeMillis", c.openTimeMillis).put("closeTimeMillis", c.closeTimeMillis)
+        .put("open", c.open).put("high", c.high).put("low", c.low).put("close", c.close)
+        .put("volume", c.volume).put("trades", c.trades)
+
+    private fun candleFromJson(o: JSONObject): Candle = Candle(
+        coin = o.getString("coin"), interval = o.getString("interval"),
+        openTimeMillis = o.getLong("openTimeMillis"), closeTimeMillis = o.getLong("closeTimeMillis"),
+        open = o.getDouble("open"), high = o.getDouble("high"), low = o.getDouble("low"), close = o.getDouble("close"),
+        volume = o.getDouble("volume"), trades = o.optInt("trades", 0)
+    )
 
     private fun candleKey(c: Candle): String = "${c.openTimeMillis}:${c.close}:${c.high}:${c.low}:${c.volume}:${c.trades}"
 

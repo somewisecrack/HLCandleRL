@@ -19,6 +19,7 @@ Android foreground service
   → VirtualPerpBroker simulates fixed-$1000 virtual position
   → causal reward/transition appended to ReplayBuffer
   → learner trains from replay sample
+  → optional offline trainer replays downloaded candles chronologically
   → UI state updated
 ```
 
@@ -70,7 +71,7 @@ Masked Double Q-learning with linear function approximation, online replay, and 
 
 ### `engine/RlEngine.kt`
 
-Owns market selection, per-market persistence, cost/context loading, candle stream, feature generation, virtual broker, replay, learner, and UI state.
+Owns market selection, per-market persistence, cost/context loading, candle stream, feature generation, virtual broker, replay, learner, offline candle download/training, downloaded-data deletion, and UI state.
 
 Transitions are causal:
 
@@ -84,7 +85,7 @@ Keeps the learner running in the background/screen-off using an Android foregrou
 
 ### `MainActivity.kt`
 
-Jetpack Compose dashboard with market selector, Start/Stop/Reset controls, candle/context/PnL/reward/replay/Q-value display.
+Jetpack Compose dashboard with market selector, Start/Stop/Reset controls, offline Download/Train/Delete controls, candle/context/PnL/reward/replay/Q-value display.
 
 ## Important design decisions
 
@@ -93,4 +94,6 @@ Jetpack Compose dashboard with market selector, Start/Stop/Reset controls, candl
 - The model learns from candles + public perp state, not L2.
 - Fixed `$1000` notional is retained so the model learns trading technique first, not sizing.
 - Invalid actions are masked before selection.
+- Offline training runs chronologically on downloaded `candleSnapshot` data stored on the phone.
+- Downloaded candle data can be deleted without resetting policy/replay.
 - The system contains no real-order pathway.
