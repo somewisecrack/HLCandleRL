@@ -47,7 +47,8 @@ import java.io.File
     val downloadDetail: String = "",
     val trainActive: Boolean = false,
     val trainProgress: Float = 0f,
-    val trainDetail: String = ""
+    val trainDetail: String = "",
+    val marketSwitching: Boolean = false
 )
 
 class RlEngine(
@@ -90,22 +91,33 @@ class RlEngine(
     fun attachPersistenceDir(dir: File) {
         persistenceRoot = dir.also { it.mkdirs() }
         configureMarketPersistence()
-        loadReplayOnce()
     }
 
     fun setMarket(label: String) {
-        if (_state.value.running || decisionJob != null) return
+        if (_state.value.running || decisionJob != null || offlineJob != null || _state.value.marketSwitching) return
         val newCoin = markets[label] ?: return
-        marketLabel = label
-        coin = newCoin
-        loadedReplay = false
-        replay.clear()
-        broker.reset()
-        learner.reset()
-        clearRuntime()
-        configureMarketPersistence()
-        loadReplayOnce()
-        _state.value = EngineUiState(status = "market changed", market = marketLabel, coin = coin, markets = markets, interval = interval, replay = replay.size())
+        _state.value = _state.value.copy(status = "switching to $label", marketSwitching = true)
+        scope.launch {
+            marketLabel = label
+            coin = newCoin
+            loadedReplay = false
+            replay.clear()
+            broker.reset()
+            learner.reset()
+            clearRuntime()
+            configureMarketPersistence()
+            withContext(Dispatchers.IO) { loadReplayOnce() }
+            _state.value = EngineUiState(
+                status = "market changed to $label",
+                market = marketLabel,
+                coin = coin,
+                markets = markets,
+                interval = interval,
+                replay = replay.size(),
+                epsilon = learner.epsilon,
+                marketSwitching = false
+            )
+        }
     }
 
     private fun configureMarketPersistence() {
@@ -292,10 +304,10 @@ class RlEngine(
     }
 
     fun start() {
-        loadReplayOnce()
-        if (_state.value.running || decisionJob != null) return
+        if (_state.value.running || decisionJob != null || offlineJob != null || _state.value.marketSwitching) return
         _state.value = _state.value.copy(status = "loading HyperLiquid context", running = false)
         decisionJob = scope.launch {
+            withContext(Dispatchers.IO) { loadReplayOnce() }
             lateinit var history: List<Candle>
             try {
                 context = withContext(Dispatchers.IO) { infoClient.loadContext(coin) }
@@ -535,11 +547,27 @@ class RlEngine(
         val file = replayAppendFile ?: return
         if (!file.exists()) return
         try {
-            val loaded = file.readLines().mapNotNull { line ->
-                if (line.isBlank()) null else try { Transition.fromJsonLine(line) } catch (_: Exception) { null }
+            var kept = 0
+            var skipped = 0
+            val tail = ArrayDeque<String>(20_000)
+            file.useLines { lines ->
+                lines.forEach { line ->
+                    if (line.isNotBlank()) {
+                        if (tail.size == 20_000) tail.removeFirst()
+                        tail.addLast(line)
+                    }
+                }
             }
-            replay.addAll(loaded)
-            _state.value = _state.value.copy(replay = replay.size(), status = "replay restored: ${replay.size()}")
+            tail.forEach { line ->
+                val t = try { Transition.fromJsonLine(line) } catch (_: Exception) { null }
+                if (t != null && t.state.size == featureBuilder.featureSize && t.nextState.size == featureBuilder.featureSize && t.nextMask.size == Action.entries.size) {
+                    replay.add(t)
+                    kept++
+                } else {
+                    skipped++
+                }
+            }
+            _state.value = _state.value.copy(replay = replay.size(), status = "replay restored: $kept${if (skipped > 0) ", skipped $skipped old rows" else ""}")
         } catch (_: Exception) {
             _state.value = _state.value.copy(status = "replay restore failed")
         }

@@ -171,6 +171,8 @@ The transition logic is causal:
 
 The selector intentionally exposes only liquid markets based on HyperLiquid public `metaAndAssetCtxs` notional volume, not every listed perp. It includes major crypto perps plus liquid `xyz:` equity/index/commodity markets. The default is BTC so the app is no longer SP500-centric.
 
+Market switching is asynchronous: replay restore is done in the background, the dropdown is temporarily disabled while switching, and old replay rows with incompatible feature dimensions are skipped.
+
 ## Offline training
 
 The app can train offline on the phone itself:

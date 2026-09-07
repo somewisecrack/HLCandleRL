@@ -138,7 +138,12 @@ private fun Dashboard(
             CardPanel {
                 SectionTitle("Market")
                 if (!state.running) {
-                    MarketSelector(state.market, state.markets.keys.toList(), onMarketChange)
+                    MarketSelector(
+                        selected = state.market,
+                        markets = state.markets.keys.toList(),
+                        enabled = !state.marketSwitching && !state.downloadActive && !state.trainActive,
+                        onMarketChange = onMarketChange
+                    )
                     Spacer(Modifier.height(8.dp))
                 }
                 MetricGrid(
@@ -272,11 +277,11 @@ private fun Header(running: Boolean, status: String, onStart: () -> Unit, onStop
 }
 
 @Composable
-private fun MarketSelector(selected: String, markets: List<String>, onMarketChange: (String) -> Unit) {
+private fun MarketSelector(selected: String, markets: List<String>, enabled: Boolean, onMarketChange: (String) -> Unit) {
     var expanded by remember { mutableStateOf(false) }
     Box {
-        OutlinedButton(onClick = { expanded = true }, modifier = Modifier.fillMaxWidth(), shape = RoundedCornerShape(14.dp)) {
-            Text("Market: $selected")
+        OutlinedButton(onClick = { expanded = true }, enabled = enabled, modifier = Modifier.fillMaxWidth(), shape = RoundedCornerShape(14.dp)) {
+            Text(if (enabled) "Market: $selected" else "Market: $selected — busy")
         }
         DropdownMenu(expanded = expanded, onDismissRequest = { expanded = false }) {
             markets.forEach { label ->
