@@ -2,14 +2,14 @@
 
 HL Candle RL is an Android-native virtual-only RL app. It now uses OHLCV candles plus public HyperLiquid perp context, not L2 order books.
 
-Status: source-patched MVP. Android build/runtime verification still needs Android Studio or a configured JDK.
+Status: Android debug build verified locally with Android Studio JBR. Device/emulator runtime testing is still recommended.
 
 ## Runtime flow
 
 ```text
 Android foreground service
   → selected market label / HyperLiquid coin
-  → HyperLiquid public /info fee + perp-context lookup
+  → HyperLiquid public /info perp-context lookup
   → HyperLiquid candle WebSocket subscription
   → latest in-memory Candle
   → fresh-candle timestamp decision gate
@@ -39,10 +39,9 @@ It parses open/high/low/close/volume/trade-count fields and reconnects/resubscri
 
 Loads public selected-market data from HyperLiquid `/info`:
 
-- `userFees` for base cross/add fee rates using the zero-address baseline.
-- `metaAndAssetCtxs` for funding, open interest, mark price, oracle price, premium, and daily volume fields.
+- `metaAndAssetCtxs` for open interest, mark price, oracle price, premium, and daily volume fields.
 
-Training refuses to start if selected-market costs/context cannot be resolved.
+The app does not call `userFees` and does not apply fee/funding costs.
 
 ### `features/OhlcvFeatureBuilder.kt`
 
@@ -63,7 +62,7 @@ Maintains one virtual perp position. Each entry uses fixed `$1000` notional:
 qty = 1000 / execution_price
 ```
 
-Since the app no longer consumes L2 depth, it does not simulate book-walking. It uses the current candle/mark price proxy and applies loaded HyperLiquid fee/funding inputs.
+Since the app no longer consumes L2 depth, it does not simulate book-walking. It uses the current candle/mark price proxy and applies no fee/funding/cost model.
 
 ### `rl/MaskedDoubleQLearner.kt`
 
@@ -71,11 +70,10 @@ Masked Double Q-learning with linear function approximation, online replay, and 
 
 ### `engine/RlEngine.kt`
 
-Owns market selection, per-market persistence, cost/context loading, candle stream, feature generation, virtual broker, replay, learner, offline candle download/training, downloaded-data deletion, and UI state.
+Owns market selection, per-market persistence, public context loading, candle stream, feature generation, virtual broker, replay, learner, offline candle download/training, downloaded-data deletion, and UI state.
 
 Transitions are causal:
 
-- entry/exit immediate execution cost is assigned to the selected entry/exit action
 - between-candle movement is assigned to legal `HOLD`/`WAIT` interval actions
 - the engine acts only once per fresh candle timestamp
 

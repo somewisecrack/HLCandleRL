@@ -8,7 +8,7 @@ import kotlin.math.ln
 
 class OhlcvFeatureBuilder(private val window: Int = 32) {
     private val candles = ArrayDeque<Candle>()
-    val featureSize: Int = window * 7 + 7 + 4
+    val featureSize: Int = window * 7 + 6 + 4
 
     fun seed(history: List<Candle>) {
         candles.clear()
@@ -60,7 +60,6 @@ class OhlcvFeatureBuilder(private val window: Int = 32) {
 
         val ctx = frame.context
         val px = frame.price.coerceAtLeast(1e-9)
-        out += (ctx.fundingRateHourly * 10_000.0).clip(-100.0, 100.0).toFloat()
         out += (ln(1.0 + ctx.openInterest)).clip(0.0, 40.0).toFloat()
         out += (((ctx.markPx.takeIf { it > 0.0 } ?: px) - px) / px * 10_000.0).clip(-200.0, 200.0).toFloat()
         out += (((ctx.oraclePx.takeIf { it > 0.0 } ?: px) - px) / px * 10_000.0).clip(-200.0, 200.0).toFloat()

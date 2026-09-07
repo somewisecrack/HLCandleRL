@@ -35,7 +35,6 @@ n: trade count, if present
 Loaded from HyperLiquid `/info` / `metaAndAssetCtxs` for the selected market:
 
 ```text
-funding
 openInterest
 markPx
 oraclePx
@@ -44,7 +43,7 @@ dayNtlVlm
 dayBaseVlm
 ```
 
-Fees are loaded from `/info` / `userFees` using the zero-address public baseline.
+Fees/funding costs are not loaded or applied in the Candle RL app.
 
 ## Not used
 

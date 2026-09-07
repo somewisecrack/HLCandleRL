@@ -153,8 +153,6 @@ private fun Dashboard(
                         "Oracle" to "%.4f".format(state.oraclePx),
                         "OI" to "%.2f".format(state.openInterest),
                         "Premium" to "%.4f bps".format(state.premiumBps),
-                        "HL taker" to "%.3f bps".format(state.crossFeeBps),
-                        "Funding/hr" to "%.4f bps".format(state.fundingBpsPerHour),
                         "Candles" to state.candleUpdates.toString(),
                         "Candle age" to "${state.candleAgeMs} ms"
                     )
@@ -205,7 +203,6 @@ private fun Dashboard(
                 BodyText(state.policy)
                 Spacer(Modifier.height(6.dp))
                 BodyText(state.learningRule)
-                BodyText("Costs: ${state.costSource}")
                 Spacer(Modifier.height(12.dp))
                 MetricGrid(
                     listOf(

@@ -14,7 +14,6 @@ data class Candle(
 )
 
 data class PerpContext(
-    val fundingRateHourly: Double = 0.0,
     val openInterest: Double = 0.0,
     val markPx: Double = 0.0,
     val oraclePx: Double = 0.0,

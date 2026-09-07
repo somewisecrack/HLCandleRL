@@ -63,7 +63,6 @@ trade count, if present
 The app also loads public selected-market context from HyperLiquid `/info`:
 
 ```text
-funding rate
 open interest
 mark price
 oracle price
@@ -105,7 +104,7 @@ fresh frame flag
 The app contains:
 
 - HyperLiquid public WebSocket client for `candle` data with reconnect/resubscribe handling.
-- HyperLiquid public `/info` loader for fees, funding, and perp context.
+- HyperLiquid public `/info` loader for perp context.
 - OHLCV-window feature builder using a 32-candle rolling window.
 - Virtual perp broker using fixed `$1000` notional per entry.
 - Masked action space.
@@ -151,7 +150,7 @@ The agent is currently learning direction/timing/holding technique, not position
 
 ## Execution and reward
 
-Because this app no longer consumes L2 depth, it does not pretend to book-walk depth. Virtual entries/exits execute at the current candle/mark price proxy and apply actual public HyperLiquid fee/funding inputs loaded from `/info`.
+Because this app no longer consumes L2 depth, it does not pretend to book-walk depth. Virtual entries/exits execute at the current candle/mark price proxy with no fee/funding/cost model.
 
 Reward is executable virtual equity change:
 
@@ -161,7 +160,6 @@ reward = current_virtual_equity - previous_virtual_equity
 
 The transition logic is causal:
 
-- immediate entry/exit fee cost is assigned to the selected entry/exit action
 - between-candle mark-to-market movement is assigned to legal interval actions:
   - `HOLD` while positioned
   - `WAIT` while flat

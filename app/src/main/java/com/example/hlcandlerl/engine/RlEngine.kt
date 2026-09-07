@@ -35,13 +35,10 @@ import java.io.File
     val qValues: String = "",
     val candleUpdates: Long = 0,
     val candleAgeMs: Long = 0,
-    val crossFeeBps: Double = 0.0,
-    val fundingBpsPerHour: Double = 0.0,
     val openInterest: Double = 0.0,
     val premiumBps: Double = 0.0,
     val markPx: Double = 0.0,
     val oraclePx: Double = 0.0,
-    val costSource: String = "not_loaded",
     val offlineCandles: Int = 0,
     val offlineRound: Int = 0,
     val offlineReport: String = "",
@@ -200,18 +197,9 @@ class RlEngine(
                 return@launch
             }
             try {
-                val costs = withContext(Dispatchers.IO) { infoClient.loadCostsAndContext(coin) }
-                broker.setCosts(costs.crossFeeRate, costs.addFeeRate, costs.fundingRateHourly, costs.source)
-                context = costs.context
-            } catch (e: Exception) {
-                _state.value = _state.value.copy(
-                    status = "cost/context load failed: ${e.javaClass.simpleName}; refusing offline train",
-                    trainActive = false,
-                    trainProgress = 0f,
-                    trainDetail = "Cannot train without public cost/context data."
-                )
-                offlineJob = null
-                return@launch
+                context = withContext(Dispatchers.IO) { infoClient.loadContext(coin) }
+            } catch (_: Exception) {
+                context = PerpContext()
             }
             repeat(rounds) { idx ->
                 _state.value = _state.value.copy(
@@ -269,10 +257,7 @@ class RlEngine(
             market = marketLabel,
             coin = coin,
             markets = markets,
-            interval = interval,
-            crossFeeBps = broker.crossFeeRate * 10_000.0,
-            fundingBpsPerHour = broker.fundingRateHourly * 10_000.0,
-            costSource = broker.costSource
+            interval = interval
         )
     }
 
@@ -309,21 +294,14 @@ class RlEngine(
     fun start() {
         loadReplayOnce()
         if (_state.value.running || decisionJob != null) return
-        _state.value = _state.value.copy(status = "loading HyperLiquid costs/context", running = false)
+        _state.value = _state.value.copy(status = "loading HyperLiquid context", running = false)
         decisionJob = scope.launch {
             lateinit var history: List<Candle>
             try {
-                val costs = withContext(Dispatchers.IO) { infoClient.loadCostsAndContext(coin) }
+                context = withContext(Dispatchers.IO) { infoClient.loadContext(coin) }
                 history = withContext(Dispatchers.IO) { infoClient.loadRecentCandles(coin, interval) }
-                broker.setCosts(costs.crossFeeRate, costs.addFeeRate, costs.fundingRateHourly, costs.source)
-                context = costs.context
             } catch (e: Exception) {
-                _state.value = _state.value.copy(status = "cost/context load failed: ${e.javaClass.simpleName}; refusing to train", running = false)
-                decisionJob = null
-                return@launch
-            }
-            if (!broker.costsLoaded) {
-                _state.value = _state.value.copy(status = "cost load failed; refusing to train", running = false)
+                _state.value = _state.value.copy(status = "context/history load failed: ${e.javaClass.simpleName}; refusing to train", running = false)
                 decisionJob = null
                 return@launch
             }
@@ -331,10 +309,7 @@ class RlEngine(
             featureBuilder.seed(history)
             _state.value = _state.value.copy(
                 status = "starting",
-                running = true,
-                crossFeeBps = broker.crossFeeRate * 10_000.0,
-                fundingBpsPerHour = broker.fundingRateHourly * 10_000.0,
-                costSource = broker.costSource
+                running = true
             )
             ws = HyperLiquidCandleWsClient(
                 coin = coin,
@@ -439,13 +414,10 @@ class RlEngine(
             qValues = q,
             candleUpdates = candleUpdates,
             candleAgeMs = if (lastCandleWallMillis == 0L) 0L else System.currentTimeMillis() - lastCandleWallMillis,
-            crossFeeBps = broker.crossFeeRate * 10_000.0,
-            fundingBpsPerHour = broker.fundingRateHourly * 10_000.0,
             openInterest = context.openInterest,
             premiumBps = context.premium * 10_000.0,
             markPx = context.markPx,
-            oraclePx = context.oraclePx,
-            costSource = broker.costSource
+            oraclePx = context.oraclePx
         )
     }
 

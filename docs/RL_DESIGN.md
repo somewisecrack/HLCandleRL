@@ -33,7 +33,6 @@ candle body
 Additional public perp context:
 
 ```text
-funding rate
 open interest
 mark-vs-candle price
 oracle-vs-candle price
@@ -93,7 +92,7 @@ Replay rows are causal:
 (state_t, action_t, reward_{t+1}, next_state_{t+1}, next_mask_{t+1}, done)
 ```
 
-Entry/exit immediate cost is assigned to the selected entry/exit action. Between-candle mark-to-market movement is assigned to legal interval actions:
+Between-candle mark-to-market movement is assigned to legal interval actions:
 
 ```text
 HOLD while positioned
@@ -108,16 +107,14 @@ The engine acts only once per fresh candle timestamp.
 reward_t = executable_virtual_equity_t - executable_virtual_equity_t_minus_1
 ```
 
-Virtual equity includes:
+Virtual equity is gross simulation PnL only:
 
 ```text
 realized PnL
 unrealized PnL at current candle/mark price
-HyperLiquid public fee rate
-HyperLiquid public funding rate
 ```
 
-Because this app no longer consumes L2 depth, it does not model book-walking slippage.
+The Candle RL app intentionally applies no fee, funding, or cost model. Because it no longer consumes L2 depth, it also does not model book-walking slippage.
 
 ## Upgrade path
 

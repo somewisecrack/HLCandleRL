@@ -9,36 +9,12 @@ import okhttp3.RequestBody.Companion.toRequestBody
 import org.json.JSONObject
 import java.util.concurrent.TimeUnit
 
-data class HyperLiquidCosts(
-    val crossFeeRate: Double,
-    val addFeeRate: Double,
-    val fundingRateHourly: Double,
-    val source: String,
-    val context: PerpContext
-)
-
 class HyperLiquidInfoClient {
     private val client = OkHttpClient.Builder()
         .connectTimeout(15, TimeUnit.SECONDS)
         .readTimeout(15, TimeUnit.SECONDS)
         .build()
     private val jsonType = "application/json".toMediaType()
-
-    fun loadCostsAndContext(coin: String): HyperLiquidCosts {
-        val fees = post(JSONObject().put("type", "userFees").put("user", ZERO_USER))
-        val schedule = fees.optJSONObject("feeSchedule")
-        val baseCross = fees.optString("userCrossRate", schedule?.optString("cross", "") ?: "").toDouble()
-        val baseAdd = fees.optString("userAddRate", schedule?.optString("add", "") ?: "").toDouble()
-        val asset = loadPerpAsset(coin)
-        val source = "hyperliquid_info:userFees+metaAndAssetCtxs coin=$coin deployerFeeScale=${asset.deployerScale}"
-        return HyperLiquidCosts(
-            crossFeeRate = baseCross * asset.deployerScale,
-            addFeeRate = baseAdd * asset.deployerScale,
-            fundingRateHourly = asset.context.fundingRateHourly,
-            source = source,
-            context = asset.context.copy(source = source)
-        )
-    }
 
     fun loadContext(coin: String): PerpContext = loadPerpAsset(coin).context
 
@@ -84,11 +60,8 @@ class HyperLiquidInfoClient {
             val name = asset.optString("name")
             if (name == coin || name == shortName) {
                 val ctx = ctxs.getJSONObject(i)
-                val scale = asset.optString("deployerFeeScale", "1.0").toDouble()
                 return AssetContext(
-                    deployerScale = scale,
                     context = PerpContext(
-                        fundingRateHourly = ctx.optString("funding", "0").toDouble(),
                         openInterest = ctx.optString("openInterest", "0").toDouble(),
                         markPx = ctx.optString("markPx", "0").toDouble(),
                         oraclePx = ctx.optString("oraclePx", "0").toDouble(),
@@ -103,8 +76,6 @@ class HyperLiquidInfoClient {
         error("selected asset $coin not found in HyperLiquid metaAndAssetCtxs")
     }
 
-    private fun post(payload: JSONObject): JSONObject = JSONObject(postText(payload))
-
     private fun postText(payload: JSONObject): String {
         val req = Request.Builder()
             .url("https://api.hyperliquid.xyz/info")
@@ -116,9 +87,5 @@ class HyperLiquidInfoClient {
         }
     }
 
-    private data class AssetContext(val deployerScale: Double, val context: PerpContext)
-
-    private companion object {
-        const val ZERO_USER = "0x0000000000000000000000000000000000000000"
-    }
+    private data class AssetContext(val context: PerpContext)
 }
