@@ -89,8 +89,8 @@ Jetpack Compose dashboard with market selector, Start/Stop/Reset controls, offli
 
 ## Important design decisions
 
-- Default market remains `SP500 -> xyz:SP500`.
-- Other markets can be selected before starting.
+- Default market is BTC.
+- A curated high-liquidity market list can be selected before starting.
 - The model learns from candles + public perp state, not L2.
 - Fixed `$1000` notional is retained so the model learns trading technique first, not sizing.
 - Invalid actions are masked before selection.

@@ -15,8 +15,8 @@ import java.io.File
  data class EngineUiState(
     val status: String = "idle",
     val running: Boolean = false,
-    val market: String = "SP500",
-    val coin: String = "xyz:SP500",
+    val market: String = "BTC",
+    val coin: String = "BTC",
     val markets: Map<String, String> = emptyMap(),
     val policy: String = "Masked Double Q-learning from OHLCV + public perp state",
     val learningRule: String = "epsilon-greedy actions + replay + executable-equity reward",
@@ -48,8 +48,8 @@ import java.io.File
 )
 
 class RlEngine(
-    defaultMarketLabel: String = "SP500",
-    private val markets: Map<String, String> = mapOf("SP500" to "xyz:SP500")
+    defaultMarketLabel: String = "BTC",
+    private val markets: Map<String, String> = mapOf("BTC" to "BTC")
 ) {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
     private var decisionJob: Job? = null

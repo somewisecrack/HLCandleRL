@@ -9,9 +9,9 @@ filesDir/learning_state/<safe_coin>/
 Examples:
 
 ```text
-filesDir/learning_state/xyz_SP500/
 filesDir/learning_state/BTC/
 filesDir/learning_state/ETH/
+filesDir/learning_state/xyz_SP500/
 ```
 
 ## Files

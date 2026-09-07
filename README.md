@@ -2,7 +2,7 @@
 
 **HL Candle RL** is an Android-native, phone-running, **virtual-only** reinforcement-learning trading agent for HyperLiquid perps.
 
-Default market: `xyz:SP500`. Selectable markets include BTC, ETH, SOL, HYPE, XRP, DOGE, LINK, WTI, and Gold.
+Default market: `BTC`. Selectable markets are a curated high-liquidity set of HyperLiquid base perps and `xyz:` markets, including BTC, ETH, SOL, HYPE, ZEC, XRP, LINK, WTI, Brent, SP500, Gold, Silver, NVDA, TSLA, AAPL, GOOGL, MU, INTC, HOOD, MSTR, PLTR, and related liquid markets.
 
 The app now learns from:
 
@@ -12,7 +12,7 @@ The app now learns from:
 
 It does **not** use L2 order books, technical-indicator rules, hardcoded entry/exit logic, private keys, or real orders.
 
-> Status: source-patched MVP. It needs Android Studio/JDK build verification on a device/emulator.
+> Status: Android debug build verified locally with Android Studio JBR. Device/emulator runtime testing is still recommended.
 
 ---
 
@@ -21,7 +21,7 @@ It does **not** use L2 order books, technical-indicator rules, hardcoded entry/e
 - Run entirely on an Android phone.
 - Learn by virtual trading directly.
 - Use compact public market-state data suitable for mobile.
-- Default to `xyz:SP500`, while allowing market selection before starting.
+- Default to BTC, while allowing market selection before starting.
 - Keep policy/replay isolated per selected coin.
 - Keep the system safe: no private keys, no wallet signing, no real exchange orders.
 - Make every action auditable: state → valid action mask → action → virtual fill → reward.
@@ -39,7 +39,7 @@ The app subscribes to HyperLiquid public WebSocket candles:
   "method": "subscribe",
   "subscription": {
     "type": "candle",
-    "coin": "xyz:SP500",
+    "coin": "BTC",
     "interval": "1m"
   }
 }
@@ -168,6 +168,10 @@ The transition logic is causal:
 
 ---
 
+## Markets
+
+The selector intentionally exposes only liquid markets based on HyperLiquid public `metaAndAssetCtxs` notional volume, not every listed perp. It includes major crypto perps plus liquid `xyz:` equity/index/commodity markets. The default is BTC so the app is no longer SP500-centric.
+
 ## Offline training
 
 The app can train offline on the phone itself:
@@ -206,7 +210,7 @@ filesDir/learning_state/<safe_coin>/replay.jsonl
 Examples:
 
 ```text
-learning_state/xyz_SP500/policy.json
+learning_state/BTC/policy.json
 learning_state/BTC/replay.jsonl
 ```
 

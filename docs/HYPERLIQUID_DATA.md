@@ -9,11 +9,13 @@ HL Candle RL uses public HyperLiquid candle data plus public perp context. It do
   "method": "subscribe",
   "subscription": {
     "type": "candle",
-    "coin": "xyz:SP500",
+    "coin": "BTC",
     "interval": "1m"
   }
 }
 ```
+
+The same subscription shape is used for selected `xyz:` markets, e.g. `xyz:SP500`, `xyz:CL`, or `xyz:NVDA`.
 
 ## Candle fields used
 
