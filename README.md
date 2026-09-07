@@ -113,7 +113,8 @@ The app contains:
 - Phone-friendly masked Double-Q learner with linear function approximation.
 - Market-specific policy/replay persistence.
 - On-phone offline training using downloaded historical candles.
-- Download/delete controls for local candle data.
+- Download/delete controls for local candle data, with visible download progress.
+- Offline training progress bar showing round/candle progress.
 - Android foreground service for background/screen-off operation.
 - Reset button to archive active replay/policy and clear runtime state.
 - Compose UI showing market, candle, context, PnL, reward, replay, epsilon, and Q-values.
@@ -178,7 +179,7 @@ The app can train offline on the phone itself:
 
 1. Tap **Download 7d** to fetch recent `1m` candles for the selected market using HyperLiquid `/info` `candleSnapshot`.
 2. Tap **Offline train** to replay the stored candles chronologically through the same virtual broker/RL loop.
-3. Watch the offline report after each round:
+3. Watch the training progress bar during each round and the offline report after each round:
 
 ```text
 trainEq

@@ -165,17 +165,31 @@ private fun Dashboard(
                 SectionTitle("Offline training")
                 BodyText("Download candles once, train multiple rounds locally on the phone, or delete downloaded data to free storage.")
                 Spacer(Modifier.height(8.dp))
+                val offlineBusy = state.downloadActive || state.trainActive
                 Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    OutlinedButton(onClick = onDownload, enabled = !state.running, modifier = Modifier.weight(1f), shape = RoundedCornerShape(14.dp)) { Text("Download 7d") }
-                    Button(onClick = onOfflineTrain, enabled = !state.running, modifier = Modifier.weight(1f), shape = RoundedCornerShape(14.dp)) { Text("Offline train") }
+                    OutlinedButton(onClick = onDownload, enabled = !state.running && !offlineBusy, modifier = Modifier.weight(1f), shape = RoundedCornerShape(14.dp)) { Text("Download 7d") }
+                    Button(onClick = onOfflineTrain, enabled = !state.running && !offlineBusy, modifier = Modifier.weight(1f), shape = RoundedCornerShape(14.dp)) { Text("Offline train") }
                 }
                 OutlinedButton(
                     onClick = onDeleteData,
-                    enabled = !state.running,
+                    enabled = !state.running && !offlineBusy,
                     modifier = Modifier.fillMaxWidth(),
                     shape = RoundedCornerShape(14.dp),
                     colors = ButtonDefaults.outlinedButtonColors(contentColor = Amber)
                 ) { Text("Delete downloaded candle data") }
+                Spacer(Modifier.height(8.dp))
+                ProgressBlock(
+                    title = "Download",
+                    active = state.downloadActive,
+                    progress = state.downloadProgress,
+                    detail = state.downloadDetail.ifBlank { if (state.offlineCandles > 0) "Stored ${state.offlineCandles} candles" else "No downloaded candles yet" }
+                )
+                ProgressBlock(
+                    title = "Training",
+                    active = state.trainActive,
+                    progress = state.trainProgress,
+                    detail = state.trainDetail.ifBlank { "Offline trainer idle" }
+                )
                 Spacer(Modifier.height(8.dp))
                 MetricGrid(
                     listOf(
@@ -279,9 +293,33 @@ private fun MarketSelector(selected: String, markets: List<String>, onMarketChan
 }
 
 @Composable
+private fun ProgressBlock(title: String, active: Boolean, progress: Float, detail: String) {
+    val pct = (progress.coerceIn(0f, 1f) * 100).toInt()
+    Column(
+        Modifier
+            .fillMaxWidth()
+            .background(Panel2, RoundedCornerShape(14.dp))
+            .padding(10.dp),
+        verticalArrangement = Arrangement.spacedBy(6.dp)
+    ) {
+        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+            Text(title, color = Muted, style = MaterialTheme.typography.labelSmall, modifier = Modifier.weight(1f))
+            Text(if (active || progress > 0f) "$pct%" else "idle", color = if (active) Green else Muted, style = MaterialTheme.typography.labelSmall, fontFamily = FontFamily.Monospace)
+        }
+        LinearProgressIndicator(
+            progress = { progress.coerceIn(0f, 1f) },
+            modifier = Modifier.fillMaxWidth().height(8.dp),
+            color = if (active) Green else Blue,
+            trackColor = Line
+        )
+        Text(detail, color = Ink, style = MaterialTheme.typography.bodySmall)
+    }
+}
+
+@Composable
 private fun StatusPill(running: Boolean) {
     val color = if (running) Green else Amber
-    Surface(color = color.copy(alpha = 0.14f), shape = RoundedCornerShape(999.dp), border = ButtonDefaults.outlinedButtonBorder) {
+    Surface(color = color.copy(alpha = 0.14f), shape = RoundedCornerShape(999.dp), border = ButtonDefaults.outlinedButtonBorder(enabled = true)) {
         Text(if (running) "LIVE" else "PAUSED", color = color, modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp), fontWeight = FontWeight.Bold)
     }
 }

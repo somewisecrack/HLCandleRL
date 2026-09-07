@@ -44,7 +44,13 @@ import java.io.File
     val costSource: String = "not_loaded",
     val offlineCandles: Int = 0,
     val offlineRound: Int = 0,
-    val offlineReport: String = ""
+    val offlineReport: String = "",
+    val downloadActive: Boolean = false,
+    val downloadProgress: Float = 0f,
+    val downloadDetail: String = "",
+    val trainActive: Boolean = false,
+    val trainProgress: Float = 0f,
+    val trainDetail: String = ""
 )
 
 class RlEngine(
@@ -119,17 +125,38 @@ class RlEngine(
     fun downloadOfflineCandles(days: Int = 7) {
         if (_state.value.running || decisionJob != null || offlineJob != null) return
         offlineJob = scope.launch {
-            _state.value = _state.value.copy(status = "downloading ${days}d candles")
+            _state.value = _state.value.copy(
+                status = "downloading ${days}d candles",
+                downloadActive = true,
+                downloadProgress = 0.05f,
+                downloadDetail = "Requesting HyperLiquid candleSnapshot for $coin..."
+            )
             try {
                 val candles = withContext(Dispatchers.IO) { infoClient.loadRecentCandles(coin, interval, days * 24L * 3_600_000L) }
+                _state.value = _state.value.copy(
+                    status = "download received; saving",
+                    downloadProgress = 0.75f,
+                    downloadDetail = "Received ${candles.size} candles; writing phone storage..."
+                )
                 val file = candleDataFile ?: return@launch
                 withContext(Dispatchers.IO) {
                     file.parentFile?.mkdirs()
                     file.writeText(candles.joinToString("\n", postfix = "\n") { candleToJson(it).toString() })
                 }
-                _state.value = _state.value.copy(status = "downloaded ${candles.size} candles", offlineCandles = candles.size)
+                _state.value = _state.value.copy(
+                    status = "downloaded ${candles.size} candles",
+                    offlineCandles = candles.size,
+                    downloadActive = false,
+                    downloadProgress = 1f,
+                    downloadDetail = "Saved ${candles.size} candles for offline training."
+                )
             } catch (e: Exception) {
-                _state.value = _state.value.copy(status = "download failed: ${e.javaClass.simpleName}")
+                _state.value = _state.value.copy(
+                    status = "download failed: ${e.javaClass.simpleName}",
+                    downloadActive = false,
+                    downloadProgress = 0f,
+                    downloadDetail = "Download failed: ${e.message ?: e.javaClass.simpleName}"
+                )
             } finally { offlineJob = null }
         }
     }
@@ -141,16 +168,34 @@ class RlEngine(
             status = if (deleted) "downloaded candle data deleted" else "no downloaded candle data",
             offlineCandles = 0,
             offlineRound = 0,
-            offlineReport = ""
+            offlineReport = "",
+            downloadActive = false,
+            downloadProgress = 0f,
+            downloadDetail = "",
+            trainActive = false,
+            trainProgress = 0f,
+            trainDetail = ""
         )
     }
 
     fun offlineTrain(rounds: Int = 5) {
         if (_state.value.running || decisionJob != null || offlineJob != null) return
         offlineJob = scope.launch {
+            _state.value = _state.value.copy(
+                status = "loading offline candle file",
+                trainActive = true,
+                trainProgress = 0.01f,
+                trainDetail = "Reading downloaded candles from phone storage..."
+            )
             val candles = withContext(Dispatchers.IO) { loadStoredCandles() }
             if (candles.size < 40) {
-                _state.value = _state.value.copy(status = "need downloaded candles first", offlineCandles = candles.size)
+                _state.value = _state.value.copy(
+                    status = "need downloaded candles first",
+                    offlineCandles = candles.size,
+                    trainActive = false,
+                    trainProgress = 0f,
+                    trainDetail = "Download candles before offline training."
+                )
                 offlineJob = null
                 return@launch
             }
@@ -159,12 +204,25 @@ class RlEngine(
                 broker.setCosts(costs.crossFeeRate, costs.addFeeRate, costs.fundingRateHourly, costs.source)
                 context = costs.context
             } catch (e: Exception) {
-                _state.value = _state.value.copy(status = "cost/context load failed: ${e.javaClass.simpleName}; refusing offline train")
+                _state.value = _state.value.copy(
+                    status = "cost/context load failed: ${e.javaClass.simpleName}; refusing offline train",
+                    trainActive = false,
+                    trainProgress = 0f,
+                    trainDetail = "Cannot train without public cost/context data."
+                )
                 offlineJob = null
                 return@launch
             }
             repeat(rounds) { idx ->
-                val report = runOfflineEpoch(candles)
+                _state.value = _state.value.copy(
+                    status = "offline training round ${idx + 1}/$rounds",
+                    offlineCandles = candles.size,
+                    offlineRound = idx + 1,
+                    trainActive = true,
+                    trainProgress = idx.toFloat() / rounds.toFloat(),
+                    trainDetail = "Round ${idx + 1}/$rounds: 0/${candles.size} candles"
+                )
+                val report = runOfflineEpoch(candles, idx, rounds)
                 _state.value = _state.value.copy(
                     status = "offline round ${idx + 1}/$rounds complete",
                     offlineCandles = candles.size,
@@ -172,10 +230,14 @@ class RlEngine(
                     offlineReport = report,
                     replay = replay.size(),
                     updates = learner.updates,
-                    epsilon = learner.epsilon
+                    epsilon = learner.epsilon,
+                    trainActive = idx + 1 < rounds,
+                    trainProgress = (idx + 1).toFloat() / rounds.toFloat(),
+                    trainDetail = "Round ${idx + 1}/$rounds complete"
                 )
                 savePolicyBestEffort()
             }
+            _state.value = _state.value.copy(trainActive = false, trainProgress = 1f, trainDetail = "Offline training complete")
             offlineJob = null
         }
     }
@@ -249,7 +311,7 @@ class RlEngine(
         if (_state.value.running || decisionJob != null) return
         _state.value = _state.value.copy(status = "loading HyperLiquid costs/context", running = false)
         decisionJob = scope.launch {
-            var history: List<Candle> = emptyList()
+            lateinit var history: List<Candle>
             try {
                 val costs = withContext(Dispatchers.IO) { infoClient.loadCostsAndContext(coin) }
                 history = withContext(Dispatchers.IO) { infoClient.loadRecentCandles(coin, interval) }
@@ -387,7 +449,7 @@ class RlEngine(
         )
     }
 
-    private fun runOfflineEpoch(candles: List<Candle>): String {
+    private fun runOfflineEpoch(candles: List<Candle>, roundIndex: Int, totalRounds: Int): String {
         broker.reset()
         featureBuilder.reset()
         lastEquity = null
@@ -402,7 +464,17 @@ class RlEngine(
         var exits = 0
         var peak = 0.0
         var maxDrawdown = 0.0
-        for (c in candles) {
+        for ((idx, c) in candles.withIndex()) {
+            if (idx % 250 == 0 || idx == candles.lastIndex) {
+                val completed = roundIndex.toFloat() + (idx + 1).toFloat() / candles.size.toFloat()
+                _state.value = _state.value.copy(
+                    trainProgress = (completed / totalRounds.toFloat()).coerceIn(0f, 1f),
+                    trainDetail = "Round ${roundIndex + 1}/$totalRounds: ${idx + 1}/${candles.size} candles",
+                    replay = replay.size(),
+                    updates = learner.updates,
+                    epsilon = learner.epsilon
+                )
+            }
             stepNo++
             val frame = MarketFrame(c, context.copy(markPx = c.close.takeIf { context.markPx <= 0.0 } ?: context.markPx))
             val stateBefore = featureBuilder.build(frame, broker.position, stepNo) ?: continue
