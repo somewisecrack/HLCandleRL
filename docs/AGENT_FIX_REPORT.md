@@ -1,6 +1,6 @@
 # HLCandleRL Fix Report
 
-Commit(s): `fa66f6b` (fixes) on top of `8090ccf`
+Commit(s): `fa66f6b` (offline training) and `7daeec6` (service/live-loop hardening) on top of `8090ccf`
 Branch: `fix/offline-training-stability`
 Build/tests: **pass** — `./gradlew clean testDebugUnitTest assembleDebug --stacktrace`, 54 unit tests, 0 failures
 Device/emulator tested: **Medium_Phone_API_36.1 emulator, Android 16 / API 36.1, 1080x2400**, fresh
@@ -142,6 +142,32 @@ rg -i "\bfee\b|funding|\bcost\b|crossFee|addFee" app/src/main/java
 
 Execution price is still `candle.close`, sizing is still `1000 / price`, and both are covered by tests.
 
+## Second pass: remaining crash paths closed (`7daeec6`)
+
+A static audit after the training work found four ways the app could still die or wedge, none of
+them on the paths already exercised above:
+
+1. **Sticky restart crashed the app.** The service returned `START_STICKY`, so after any process
+   death Android re-delivered a null intent while the app was in the background and `startLearner()`
+   called `startForeground()` from there — `ForegroundServiceStartNotAllowedException` on Android
+   12+. A null intent now stops the service, every path returns `START_NOT_STICKY`, and the
+   `startForeground()` call is guarded.
+2. **Android 15+ foreground-service timeout.** A long-running `dataSync` service that ignores its
+   timeout is force-crashed by the platform. `Service.onTimeout` is now overridden (both the API 35
+   and API 36 signatures; `compileSdk` moved to 36 for the latter, `targetSdk` unchanged) and stops
+   the learner cleanly. This one matters on the user's own phone, which runs Android 17.
+3. **An exception in `tick()` killed the process.** It escaped the coroutine to the default handler.
+   Decision steps are now caught and surfaced in the status line, and the learner stops itself after
+   five consecutive failures instead of taking the app down.
+4. **A failed notification refresh or a throwing market switch** could do the same; both are
+   contained now.
+
+Abuse test on a fresh install, all with the process id watched: 12 back-to-back Start/Stop taps with
+no settling time, 36 rapid taps across Download 1d/3d/7d, Train 1/3, Stop training and Delete,
+home-and-resume during a training run, and a relaunch while the live learner was running. The
+process never restarted, Stop always settled to PAUSED with Start re-enabled, and the crash buffer,
+FATAL, ANR and foreground-service checks were all empty.
+
 ## Remaining risks
 
 - One `candleSnapshot` request does not return the requested window: 7d yields ~5150 candles, 1d
@@ -157,6 +183,8 @@ Execution price is still `candle.close`, sizing is still `1000 / price`, and bot
 - Opening the 46-item market dropdown was the one place that showed frame skips on the pre-fix build.
   The obvious fix (a LazyColumn) is not usable inside `DropdownMenu`; if it still feels slow, the menu
   needs a different container (e.g. a modal bottom sheet with a lazy list).
+- The learner is no longer resurrected after a process death (`START_NOT_STICKY`); a long run that
+  the system kills must be restarted by hand. That is deliberate — the alternative crashed.
 - `AppRuntime.engine` remains a process-wide singleton shared by Activity and Service. All state
   writes are atomic now and attach is idempotent, but two components still drive one engine.
 
