@@ -150,7 +150,7 @@ The agent is currently learning direction/timing/holding technique, not position
 
 ## Execution and reward
 
-Because this app no longer consumes L2 depth, it does not pretend to book-walk depth. Virtual entries/exits execute at the current candle/mark price proxy with no fee/funding/cost model.
+Because this app no longer consumes L2 depth, it does not pretend to book-walk depth. Virtual entries/exits execute at the candle close proxy with no fee/funding/cost model. Mark/oracle/OI/premium remain context fields only; they do not replace historical candle prices during offline replay.
 
 Reward is executable virtual equity change:
 
@@ -182,11 +182,13 @@ The app can train offline on the phone itself:
 3. Watch the training progress bar during each round and the offline report after each round:
 
 ```text
+processed frames
 trainEq
 reward
 positive/negative rewards
 entry/exit count
 max drawdown
+action counts
 ```
 
 The same stored candle file can be reused for multiple offline training rounds. Tap **Delete downloaded candle data** to remove it from phone storage without resetting policy/replay.

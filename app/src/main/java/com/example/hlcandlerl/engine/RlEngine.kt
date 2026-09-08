@@ -448,6 +448,8 @@ class RlEngine(
         var exits = 0
         var peak = 0.0
         var maxDrawdown = 0.0
+        var frames = 0
+        val actionCounts = IntArray(Action.entries.size)
         for ((idx, c) in candles.withIndex()) {
             if (idx % 250 == 0 || idx == candles.lastIndex) {
                 val completed = roundIndex.toFloat() + (idx + 1).toFloat() / candles.size.toFloat()
@@ -460,8 +462,9 @@ class RlEngine(
                 )
             }
             stepNo++
-            val frame = MarketFrame(c, context.copy(markPx = c.close.takeIf { context.markPx <= 0.0 } ?: context.markPx))
+            val frame = MarketFrame(c, context)
             val stateBefore = featureBuilder.build(frame, broker.position, stepNo) ?: continue
+            frames++
             val first = lastEquity == null
             val prevEq = lastEquity ?: broker.equity(frame)
             pendingState?.let { ps ->
@@ -475,6 +478,7 @@ class RlEngine(
                 }
             }
             val actionIdx = learner.select(stateBefore, broker.validMask(), explore = true)
+            actionCounts[actionIdx]++
             val result = broker.step(Action.entries[actionIdx], frame, stepNo)
             lastEquity = result.equity
             val stateAfter = featureBuilder.patchPosition(stateBefore, broker.position, stepNo)
@@ -499,7 +503,8 @@ class RlEngine(
             if (dd < maxDrawdown) maxDrawdown = dd
         }
         val finalEq = candles.lastOrNull()?.let { broker.equity(MarketFrame(it, context)) } ?: 0.0
-        return "trainEq ${"%+.2f".format(finalEq)} reward ${"%+.2f".format(rewardSum)} +$positive/-$negative trades $entries/$exits maxDD ${"%.2f".format(maxDrawdown)}"
+        val actions = Action.entries.joinToString("/") { "${it.name.first()}=${actionCounts[it.ordinal]}" }
+        return "frames $frames trainEq ${"%+.2f".format(finalEq)} reward ${"%+.2f".format(rewardSum)} +$positive/-$negative trades $entries/$exits maxDD ${"%.2f".format(maxDrawdown)} actions $actions"
     }
 
     private fun savePolicyBestEffort() {

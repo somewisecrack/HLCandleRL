@@ -27,7 +27,10 @@ data class MarketFrame(
     val candle: Candle,
     val context: PerpContext
 ) {
-    val price: Double get() = if (context.markPx > 0.0) context.markPx else candle.close
+    // Candle RL executes virtual trades on the candle close proxy. Public mark/oracle/OI/premium
+    // remain context features/display fields, but must not replace historical candle prices during
+    // offline replay or all historical steps can share one stale mark price.
+    val price: Double get() = candle.close
 }
 
 enum class Action { WAIT, ENTER_LONG, ENTER_SHORT, HOLD, EXIT }
