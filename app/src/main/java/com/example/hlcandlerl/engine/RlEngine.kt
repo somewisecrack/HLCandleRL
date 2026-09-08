@@ -12,9 +12,11 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.update
 import org.json.JSONObject
 import java.io.File
+import kotlin.coroutines.coroutineContext
 
- data class EngineUiState(
+data class EngineUiState(
     val status: String = "idle",
+    val phase: String = "idle",
     val running: Boolean = false,
     val market: String = "BTC",
     val coin: String = "BTC",
@@ -42,7 +44,14 @@ import java.io.File
     val oraclePx: Double = 0.0,
     val offlineCandles: Int = 0,
     val offlineRound: Int = 0,
+    val offlineRounds: Int = 0,
     val offlineReport: String = "",
+    val processedCandles: Int = 0,
+    val totalCandles: Int = 0,
+    val actionCounts: String = "",
+    val elapsedMs: Long = 0,
+    val etaMs: Long = 0,
+    val storageBytes: Long = 0,
     val downloadActive: Boolean = false,
     val downloadProgress: Float = 0f,
     val downloadDetail: String = "",
@@ -66,7 +75,7 @@ class RlEngine(
     private val featureBuilder = OhlcvFeatureBuilder(window = 32)
     private val broker = VirtualPerpBroker()
     private val learner = MaskedDoubleQLearner(inputDim = featureBuilder.featureSize)
-    private val replay = ReplayBuffer()
+    private val replay = ReplayBuffer(capacity = REPLAY_CAPACITY)
     private var ws: HyperLiquidCandleWsClient? = null
     private var latestCandle: Candle? = null
     private var context: PerpContext = PerpContext()
@@ -74,7 +83,6 @@ class RlEngine(
     private var pendingState: FloatArray? = null
     private var pendingAction: Int? = null
     private var pendingDone: Boolean = false
-    private var lastDecisionCandleTimeMillis: Long = 0L
     private var lastDecisionFrameKey: String = ""
     private var lastSeenFrameKey: String = ""
     private var stepNo: Long = 0
@@ -86,42 +94,53 @@ class RlEngine(
     private var offlineMode: Boolean = false
     private var candleUpdates: Long = 0L
     private var lastCandleWallMillis: Long = 0L
+    private var lastUiPublishMs: Long = 0L
+    private var appendsSinceSizeCheck: Int = 0
 
     private val _state = MutableStateFlow(EngineUiState(market = marketLabel, coin = coin, markets = markets, interval = interval))
     val state: StateFlow<EngineUiState> = _state
 
     fun attachPersistenceDir(dir: File) {
-        persistenceRoot = dir.also { it.mkdirs() }
+        val root = dir.also { it.mkdirs() }
+        // Attaching is idempotent and must never disturb work already in flight: the Activity calls
+        // it on entry while the Service may already be training or streaming.
+        if (persistenceRoot == root && persistenceDir != null) return
+        persistenceRoot = root
         configureMarketPersistence()
     }
 
     fun setMarket(label: String) {
-        if (_state.value.running || decisionJob != null || offlineJob != null || _state.value.marketSwitching) return
+        if (busy()) return
         val newCoin = markets[label] ?: return
-        _state.value = _state.value.copy(status = "switching to $label", marketSwitching = true)
+        _state.update { it.copy(status = "switching to $label", marketSwitching = true) }
         scope.launch {
             marketLabel = label
             coin = newCoin
+            // Switching stays off the disk entirely. The persisted replay is only restored when the
+            // learner actually starts, so a market change can never block on a large file.
             loadedReplay = false
             replay.clear()
             broker.reset()
             learner.reset()
             clearRuntime()
             configureMarketPersistence()
-            withContext(Dispatchers.IO) { loadReplayOnce() }
-            _state.value = EngineUiState(
-                status = "market changed to $label",
-                market = marketLabel,
-                coin = coin,
-                markets = markets,
-                interval = interval,
-                replay = replay.size(),
-                epsilon = learner.epsilon,
-                marketSwitching = false
-            )
-            publishStoredCandleCount()
+            _state.update {
+                EngineUiState(
+                    status = "market changed to $label",
+                    market = marketLabel,
+                    coin = coin,
+                    markets = markets,
+                    interval = interval,
+                    epsilon = learner.epsilon,
+                    marketSwitching = false
+                )
+            }
+            publishStorageStats()
         }
     }
+
+    private fun busy(): Boolean =
+        _state.value.running || decisionJob != null || offlineJob != null || _state.value.marketSwitching
 
     private fun configureMarketPersistence() {
         val root = persistenceRoot ?: return
@@ -129,170 +148,274 @@ class RlEngine(
         persistenceDir = File(root, safe).also { it.mkdirs() }
         replayAppendFile = File(persistenceDir, "replay.jsonl")
         candleDataFile = File(persistenceDir, "candles_${interval}.jsonl")
-        publishStoredCandleCount()
+        publishStorageStats()
     }
 
-    /** Reads the stored candle count off the main thread so a relaunch shows what is already downloaded. */
-    private fun publishStoredCandleCount() {
+    /** Reads stored candle count and disk usage off the main thread so a relaunch reflects reality. */
+    private fun publishStorageStats() {
+        val dir = persistenceDir ?: return
         val file = candleDataFile ?: return
         val coinAtRequest = coin
         scope.launch(Dispatchers.IO) {
-            val count = try { if (file.exists()) file.useLines { it.count { line -> line.isNotBlank() } } else 0 } catch (_: Exception) { 0 }
+            val count = try {
+                if (file.exists()) file.useLines { lines -> lines.count { it.isNotBlank() } } else 0
+            } catch (_: Exception) { 0 }
+            val bytes = try { dir.listFiles()?.sumOf { it.length() } ?: 0L } catch (_: Exception) { 0L }
             // Atomic CAS update: a plain read-modify-write here can clobber a concurrent
             // market-switch/reset state assignment and silently drop its fields.
             _state.update { current ->
                 if (coinAtRequest == coin && !current.downloadActive && !current.trainActive) {
-                    current.copy(offlineCandles = count)
+                    current.copy(offlineCandles = count, storageBytes = bytes)
                 } else current
             }
         }
     }
 
     fun policyFile(): File? = persistenceDir?.let { File(it, "policy.json") }
+    fun summaryFile(): File? = persistenceDir?.let { File(it, "offline_summary.json") }
     fun exportPolicyJson(): String = learner.snapshotJson()
 
-    fun downloadOfflineCandles(days: Int = 7) {
-        if (_state.value.running || decisionJob != null || offlineJob != null) return
+    fun downloadOfflineCandles(days: Int = 1) {
+        if (busy()) return
         offlineJob = scope.launch {
-            _state.value = _state.value.copy(
-                status = "downloading ${days}d candles",
-                downloadActive = true,
-                downloadProgress = 0.05f,
-                downloadDetail = "Requesting HyperLiquid candleSnapshot for $coin..."
-            )
+            _state.update {
+                it.copy(
+                    status = "downloading ${days}d candles",
+                    phase = "downloading",
+                    downloadActive = true,
+                    downloadProgress = 0.05f,
+                    downloadDetail = "Requesting HyperLiquid candleSnapshot for $coin..."
+                )
+            }
             try {
                 val candles = withContext(Dispatchers.IO) { infoClient.loadRecentCandles(coin, interval, days * 24L * 3_600_000L) }
-                _state.value = _state.value.copy(
-                    status = "download received; saving",
-                    downloadProgress = 0.75f,
-                    downloadDetail = "Received ${candles.size} candles; writing phone storage..."
-                )
+                _state.update {
+                    it.copy(
+                        status = "download received; saving",
+                        downloadProgress = 0.75f,
+                        downloadDetail = "Received ${candles.size} candles; writing phone storage..."
+                    )
+                }
                 val file = candleDataFile ?: error("no storage directory attached")
                 withContext(Dispatchers.IO) {
                     file.parentFile?.mkdirs()
-                    file.writeText(candles.joinToString("\n", postfix = "\n") { candleToJson(it).toString() })
+                    // Streamed so a large snapshot never becomes one giant String in memory.
+                    file.bufferedWriter().use { w ->
+                        candles.forEach { c -> w.write(candleToJson(c).toString()); w.newLine() }
+                    }
                 }
-                _state.value = _state.value.copy(
-                    status = "downloaded ${candles.size} candles",
-                    offlineCandles = candles.size,
-                    downloadActive = false,
-                    downloadProgress = 1f,
-                    downloadDetail = "Saved ${candles.size} candles for offline training."
-                )
+                _state.update {
+                    it.copy(
+                        status = "downloaded ${candles.size} candles",
+                        offlineCandles = candles.size,
+                        downloadProgress = 1f,
+                        // Deliberately not phrased as a full window: one candleSnapshot request
+                        // usually returns fewer candles than the days requested.
+                        downloadDetail = "Downloaded ${candles.size} candles (requested ${days}d)."
+                    )
+                }
+            } catch (e: CancellationException) {
+                throw e
             } catch (e: Exception) {
-                _state.value = _state.value.copy(
-                    status = "download failed: ${e.javaClass.simpleName}",
-                    downloadActive = false,
-                    downloadProgress = 0f,
-                    downloadDetail = "Download failed: ${e.message ?: e.javaClass.simpleName}"
-                )
+                _state.update {
+                    it.copy(
+                        status = "download failed: ${e.javaClass.simpleName}",
+                        downloadProgress = 0f,
+                        downloadDetail = "Download failed: ${e.message ?: e.javaClass.simpleName}"
+                    )
+                }
             } finally {
-                _state.value = _state.value.copy(downloadActive = false)
                 offlineJob = null
+                _state.update { it.copy(downloadActive = false, phase = "idle") }
+                publishStorageStats()
             }
         }
     }
 
     fun deleteDownloadedData() {
-        if (_state.value.running || decisionJob != null || offlineJob != null) return
+        if (busy()) {
+            _state.update { it.copy(status = "stop the learner/training before deleting data") }
+            return
+        }
         val deleted = candleDataFile?.takeIf { it.exists() }?.delete() == true
-        _state.value = _state.value.copy(
-            status = if (deleted) "downloaded candle data deleted" else "no downloaded candle data",
-            offlineCandles = 0,
-            offlineRound = 0,
-            offlineReport = "",
-            downloadActive = false,
-            downloadProgress = 0f,
-            downloadDetail = "",
-            trainActive = false,
-            trainProgress = 0f,
-            trainDetail = ""
-        )
+        _state.update {
+            it.copy(
+                status = if (deleted) "downloaded candle data deleted" else "no downloaded candle data",
+                phase = "idle",
+                offlineCandles = 0,
+                offlineRound = 0,
+                offlineRounds = 0,
+                offlineReport = "",
+                processedCandles = 0,
+                totalCandles = 0,
+                downloadActive = false,
+                downloadProgress = 0f,
+                downloadDetail = "",
+                trainActive = false,
+                trainProgress = 0f,
+                trainDetail = ""
+            )
+        }
+        publishStorageStats()
     }
 
-    fun offlineTrain(rounds: Int = 5) {
-        if (_state.value.running || decisionJob != null || offlineJob != null) return
+    /** Cancels an in-flight offline training run. The run clears its own busy state in `finally`. */
+    fun stopOfflineTraining() {
+        val job = offlineJob ?: return
+        _state.update { it.copy(status = "stopping offline training", trainDetail = "Stopping...") }
+        job.cancel()
+    }
+
+    fun offlineTrain(rounds: Int = 1) {
+        if (busy()) return
         offlineJob = scope.launch {
-            _state.value = _state.value.copy(
-                status = "loading offline candle file",
-                trainActive = true,
-                trainProgress = 0.01f,
-                trainDetail = "Reading downloaded candles from phone storage..."
-            )
-            val candles = withContext(Dispatchers.IO) { loadStoredCandles() }
-            if (candles.size < 40) {
-                _state.value = _state.value.copy(
-                    status = "need downloaded candles first",
-                    offlineCandles = candles.size,
-                    trainActive = false,
-                    trainProgress = 0f,
-                    trainDetail = "Download candles before offline training."
+            val startedAt = System.currentTimeMillis()
+            _state.update {
+                it.copy(
+                    status = "loading offline candle file",
+                    phase = "loading",
+                    trainActive = true,
+                    trainProgress = 0.01f,
+                    trainDetail = "Reading downloaded candles from phone storage..."
                 )
-                offlineJob = null
-                return@launch
             }
             try {
-                context = withContext(Dispatchers.IO) { infoClient.loadContext(coin) }
-            } catch (_: Exception) {
-                context = PerpContext()
-            }
-            offlineMode = true
-            try {
-                repeat(rounds) { idx ->
-                    _state.value = _state.value.copy(
-                        status = "offline training round ${idx + 1}/$rounds",
-                        offlineCandles = candles.size,
-                        offlineRound = idx + 1,
-                        trainActive = true,
-                        trainProgress = idx.toFloat() / rounds.toFloat(),
-                        trainDetail = "Round ${idx + 1}/$rounds: 0/${candles.size} candles"
-                    )
-                    val report = runOfflineEpoch(candles, idx, rounds)
-                    _state.value = _state.value.copy(
-                        status = "offline round ${idx + 1}/$rounds complete",
-                        offlineCandles = candles.size,
-                        offlineRound = idx + 1,
-                        offlineReport = report,
-                        replay = replay.size(),
-                        updates = learner.updates,
-                        epsilon = learner.epsilon,
-                        trainActive = idx + 1 < rounds,
-                        trainProgress = (idx + 1).toFloat() / rounds.toFloat(),
-                        trainDetail = "Round ${idx + 1}/$rounds complete"
-                    )
-                    savePolicyBestEffort()
+                val candles = withContext(Dispatchers.IO) { loadStoredCandles() }
+                if (candles.size < 40) {
+                    _state.update {
+                        it.copy(
+                            status = "need downloaded candles first",
+                            offlineCandles = candles.size,
+                            trainActive = false,
+                            trainProgress = 0f,
+                            trainDetail = "Download candles before offline training."
+                        )
+                    }
+                    return@launch
                 }
-                withContext(Dispatchers.IO) { compactReplayFile() }
-                _state.value = _state.value.copy(trainActive = false, trainProgress = 1f, trainDetail = "Offline training complete")
+                withContext(Dispatchers.IO) { restorePersistedPolicy() }
+                context = try {
+                    withContext(Dispatchers.IO) { infoClient.loadContext(coin) }
+                } catch (e: CancellationException) {
+                    throw e
+                } catch (_: Exception) {
+                    PerpContext()
+                }
+                offlineMode = true
+                repeat(rounds) { idx ->
+                    _state.update {
+                        it.copy(
+                            status = "offline training round ${idx + 1}/$rounds",
+                            phase = "training",
+                            offlineCandles = candles.size,
+                            offlineRound = idx + 1,
+                            offlineRounds = rounds,
+                            totalCandles = candles.size,
+                            processedCandles = 0,
+                            trainActive = true,
+                            trainProgress = idx.toFloat() / rounds.toFloat(),
+                            trainDetail = "Round ${idx + 1}/$rounds: 0/${candles.size} candles"
+                        )
+                    }
+                    val report = runOfflineEpoch(candles, idx, rounds, startedAt)
+                    _state.update {
+                        it.copy(
+                            status = "offline round ${idx + 1}/$rounds complete",
+                            offlineReport = report,
+                            replay = replay.size(),
+                            updates = learner.updates,
+                            epsilon = learner.epsilon,
+                            trainProgress = (idx + 1).toFloat() / rounds.toFloat(),
+                            trainDetail = "Round ${idx + 1}/$rounds complete"
+                        )
+                    }
+                    withContext(Dispatchers.IO) {
+                        savePolicyBestEffort()
+                        saveOfflineSummary(report, rounds, candles.size, startedAt)
+                    }
+                }
+                _state.update {
+                    it.copy(
+                        trainActive = false,
+                        trainProgress = 1f,
+                        processedCandles = it.totalCandles,
+                        trainDetail = "Offline training complete",
+                        elapsedMs = System.currentTimeMillis() - startedAt,
+                        etaMs = 0
+                    )
+                }
             } catch (e: CancellationException) {
-                throw e
+                // Cooperative stop: keep whatever the run already learned and checkpoint it.
+                withContext(NonCancellable) {
+                    withContext(Dispatchers.IO) { savePolicyBestEffort() }
+                    _state.update {
+                        it.copy(
+                            status = "offline training stopped",
+                            trainActive = false,
+                            trainDetail = "Stopped after ${it.processedCandles}/${it.totalCandles} candles; policy kept."
+                        )
+                    }
+                }
             } catch (e: Exception) {
-                _state.value = _state.value.copy(
-                    status = "offline training failed: ${e.javaClass.simpleName}",
-                    trainActive = false,
-                    trainProgress = 0f,
-                    trainDetail = "Offline training failed: ${e.message ?: e.javaClass.simpleName}"
-                )
+                _state.update {
+                    it.copy(
+                        status = "offline training failed: ${e.javaClass.simpleName}",
+                        trainActive = false,
+                        trainProgress = 0f,
+                        trainDetail = "Offline training failed: ${e.message ?: e.javaClass.simpleName}"
+                    )
+                }
             } finally {
                 offlineMode = false
                 offlineJob = null
+                _state.update { it.copy(phase = "idle", trainActive = false) }
+                publishStorageStats()
             }
         }
     }
+
     fun importPolicyJson(json: String) {
         learner.restoreJson(json)
-        _state.value = _state.value.copy(updates = learner.updates, epsilon = learner.epsilon, status = "policy restored")
+        _state.update { it.copy(updates = learner.updates, epsilon = learner.epsilon, status = "policy restored") }
     }
+
+    /**
+     * Restores policy.json when it matches the current feature size. A policy saved before a feature
+     * change carries a different inputDim; it is archived and the learner starts fresh instead of
+     * throwing on every start.
+     */
+    fun restorePersistedPolicy() {
+        val file = policyFile() ?: return
+        if (!file.exists()) return
+        try {
+            learner.restoreJson(file.readText())
+            _state.update { it.copy(updates = learner.updates, epsilon = learner.epsilon, status = "policy restored") }
+        } catch (_: Exception) {
+            archive(file)
+            learner.reset()
+            _state.update {
+                it.copy(
+                    updates = learner.updates,
+                    epsilon = learner.epsilon,
+                    status = "incompatible policy archived; starting fresh"
+                )
+            }
+        }
+    }
+
+    private fun archive(file: File): Boolean = try {
+        val ts = System.currentTimeMillis()
+        file.renameTo(File(file.parentFile, "${file.nameWithoutExtension}.archive-$ts.${file.extension}"))
+    } catch (_: Exception) { false }
 
     fun resetLearning() {
         val wasRunning = _state.value.running
         stop()
-        val ts = System.currentTimeMillis()
         try {
             persistenceDir?.let { dir ->
-                listOf("policy.json", "replay.jsonl").forEach { name ->
+                listOf("policy.json", "replay.jsonl", "offline_summary.json").forEach { name ->
                     val f = File(dir, name)
-                    if (f.exists()) f.renameTo(File(dir, "${f.nameWithoutExtension}.archive-$ts.${f.extension}"))
+                    if (f.exists()) archive(f)
                 }
             }
         } catch (_: Exception) { }
@@ -301,15 +424,17 @@ class RlEngine(
         replay.clear()
         clearRuntime()
         loadedReplay = true
-        _state.value = EngineUiState(
-            status = if (wasRunning) "learning reset; press Start" else "learning reset",
-            running = false,
-            market = marketLabel,
-            coin = coin,
-            markets = markets,
-            interval = interval
-        )
-        publishStoredCandleCount()
+        _state.update {
+            EngineUiState(
+                status = if (wasRunning) "learning reset; press Start" else "learning reset",
+                running = false,
+                market = marketLabel,
+                coin = coin,
+                markets = markets,
+                interval = interval
+            )
+        }
+        publishStorageStats()
     }
 
     private fun clearRuntime(clearContext: Boolean = true) {
@@ -319,7 +444,6 @@ class RlEngine(
         pendingState = null
         pendingAction = null
         pendingDone = false
-        lastDecisionCandleTimeMillis = 0L
         lastDecisionFrameKey = ""
         lastSeenFrameKey = ""
         stepNo = 0L
@@ -328,14 +452,18 @@ class RlEngine(
         featureBuilder.reset()
     }
 
+    /**
+     * Rewrites the persisted replay to the newest [PERSISTED_REPLAY_ROWS] rows. Rows are ~9 KB, so
+     * the file is deliberately capped: rewriting the whole buffer as one joined String used to
+     * allocate >100 MB and throw OutOfMemoryError on a phone.
+     */
     fun compactReplayFile() {
         val file = replayAppendFile ?: return
         try {
+            val rows = replay.snapshot().takeLast(PERSISTED_REPLAY_ROWS)
             val tmp = File(file.parentFile, "replay.jsonl.tmp")
-            // Stream row by row: the buffer holds up to 20k transitions of ~9 KB, so building one
-            // joined String here allocates >100 MB and reliably throws OutOfMemoryError on a phone.
             tmp.bufferedWriter().use { w ->
-                replay.snapshot().forEach { t ->
+                rows.forEach { t ->
                     w.write(t.toJsonLine())
                     w.newLine()
                 }
@@ -345,30 +473,35 @@ class RlEngine(
                 tmp.renameTo(file)
             }
         } catch (_: Exception) {
-            _state.value = _state.value.copy(status = "replay checkpoint failed")
+            _state.update { it.copy(status = "replay checkpoint failed") }
         }
     }
 
     fun start() {
-        if (_state.value.running || decisionJob != null || offlineJob != null || _state.value.marketSwitching) return
-        _state.value = _state.value.copy(status = "loading HyperLiquid context", running = false)
+        if (busy()) return
+        _state.update { it.copy(status = "loading HyperLiquid context", phase = "starting", running = false) }
         decisionJob = scope.launch {
-            withContext(Dispatchers.IO) { loadReplayOnce() }
+            withContext(Dispatchers.IO) {
+                restorePersistedPolicy()
+                loadReplayOnce()
+            }
             lateinit var history: List<Candle>
             try {
                 context = withContext(Dispatchers.IO) { infoClient.loadContext(coin) }
                 history = withContext(Dispatchers.IO) { infoClient.loadRecentCandles(coin, interval) }
+            } catch (e: CancellationException) {
+                decisionJob = null
+                throw e
             } catch (e: Exception) {
-                _state.value = _state.value.copy(status = "context/history load failed: ${e.javaClass.simpleName}; refusing to train", running = false)
+                _state.update {
+                    it.copy(status = "context/history load failed: ${e.javaClass.simpleName}; refusing to train", phase = "idle", running = false)
+                }
                 decisionJob = null
                 return@launch
             }
             clearRuntime(clearContext = false)
             featureBuilder.seed(history)
-            _state.value = _state.value.copy(
-                status = "starting",
-                running = true
-            )
+            _state.update { it.copy(status = "starting", phase = "live", running = true) }
             ws = HyperLiquidCandleWsClient(
                 coin = coin,
                 interval = interval,
@@ -383,7 +516,7 @@ class RlEngine(
                         }
                     }
                 },
-                onStatus = { s -> _state.value = _state.value.copy(status = s) }
+                onStatus = { s -> _state.update { st -> st.copy(status = s) } }
             ).also { it.connect() }
             while (isActive) {
                 tick()
@@ -397,7 +530,7 @@ class RlEngine(
         ws = null
         decisionJob?.cancel()
         decisionJob = null
-        _state.value = _state.value.copy(status = "stopped", running = false)
+        _state.update { it.copy(status = "stopped", phase = "idle", running = false) }
     }
 
     private suspend fun tick() {
@@ -405,7 +538,6 @@ class RlEngine(
         val key = candleKey(candle)
         if (key == lastDecisionFrameKey) return
         lastDecisionFrameKey = key
-        lastDecisionCandleTimeMillis = candle.openTimeMillis
         stepNo++
         if (stepNo % 60L == 0L) {
             try { context = withContext(Dispatchers.IO) { infoClient.loadContext(coin) } } catch (_: Exception) { }
@@ -421,7 +553,7 @@ class RlEngine(
                 val transition = Transition(ps, pa, intervalReward, stateBeforeAction, broker.validMask(), pendingDone)
                 replay.add(transition)
                 appendTransition(transition)
-                if (replay.size() >= 64) learner.train(replay.sample(32))
+                if (replay.size() >= 64) learner.train(replay.sample(TRAIN_BATCH))
             }
         }
 
@@ -432,12 +564,11 @@ class RlEngine(
         lastEquity = result.equity
         val stateAfterAction = featureBuilder.patchPosition(stateBeforeAction, broker.position, stepNo)
 
-        if (result.reason.startsWith("enter") || result.reason == "exit" || result.reason == "forced_exit_max_hold") {
-            val effectiveIdx = result.action.ordinal
-            val transition = Transition(stateBeforeAction, effectiveIdx, result.reward, stateAfterAction, broker.validMask(), result.reason == "exit" || result.reason == "forced_exit_max_hold")
+        if (isTradeReason(result.reason)) {
+            val transition = Transition(stateBeforeAction, result.action.ordinal, result.reward, stateAfterAction, broker.validMask(), isExitReason(result.reason))
             replay.add(transition)
             appendTransition(transition)
-            if (replay.size() >= 64) learner.train(replay.sample(32))
+            if (replay.size() >= 64) learner.train(replay.sample(TRAIN_BATCH))
         }
 
         if (firstDecision && broker.position == null && result.reason == "wait_flat") {
@@ -451,35 +582,38 @@ class RlEngine(
         }
 
         val q = learner.qValues(stateBeforeAction).joinToString(prefix = "[", postfix = "]") { "%.3f".format(it) }
-        _state.value = EngineUiState(
-            status = "running",
-            running = true,
-            market = marketLabel,
-            coin = coin,
-            markets = markets,
-            interval = interval,
-            close = candle.close,
-            candleVolume = candle.volume,
-            action = action.name,
-            reason = result.reason,
-            reward = result.reward,
-            equity = result.equity,
-            realizedPnl = broker.cashPnl,
-            position = broker.position?.let { "${it.side} @ ${"%.2f".format(it.entryPx)}" } ?: "flat",
-            replay = replay.size(),
-            updates = learner.updates,
-            epsilon = learner.epsilon,
-            qValues = q,
-            candleUpdates = candleUpdates,
-            candleAgeMs = if (lastCandleWallMillis == 0L) 0L else System.currentTimeMillis() - lastCandleWallMillis,
-            openInterest = context.openInterest,
-            premiumBps = context.premium * 10_000.0,
-            markPx = context.markPx,
-            oraclePx = context.oraclePx
-        )
+        _state.update {
+            it.copy(
+                status = "running",
+                phase = "live",
+                running = true,
+                market = marketLabel,
+                coin = coin,
+                markets = markets,
+                interval = interval,
+                close = candle.close,
+                candleVolume = candle.volume,
+                action = action.name,
+                reason = result.reason,
+                reward = result.reward,
+                equity = result.equity,
+                realizedPnl = broker.cashPnl,
+                position = broker.position?.let { p -> "${p.side} @ ${"%.2f".format(p.entryPx)}" } ?: "flat",
+                replay = replay.size(),
+                updates = learner.updates,
+                epsilon = learner.epsilon,
+                qValues = q,
+                candleUpdates = candleUpdates,
+                candleAgeMs = if (lastCandleWallMillis == 0L) 0L else System.currentTimeMillis() - lastCandleWallMillis,
+                openInterest = context.openInterest,
+                premiumBps = context.premium * 10_000.0,
+                markPx = context.markPx,
+                oraclePx = context.oraclePx
+            )
+        }
     }
 
-    private fun runOfflineEpoch(candles: List<Candle>, roundIndex: Int, totalRounds: Int): String {
+    private suspend fun runOfflineEpoch(candles: List<Candle>, roundIndex: Int, totalRounds: Int, startedAtMs: Long): String {
         broker.reset()
         featureBuilder.reset()
         lastEquity = null
@@ -495,18 +629,12 @@ class RlEngine(
         var peak = 0.0
         var maxDrawdown = 0.0
         var frames = 0
+        var sinceTrain = 0
         val actionCounts = IntArray(Action.entries.size)
         for ((idx, c) in candles.withIndex()) {
-            if (idx % 250 == 0 || idx == candles.lastIndex) {
-                val completed = roundIndex.toFloat() + (idx + 1).toFloat() / candles.size.toFloat()
-                _state.value = _state.value.copy(
-                    trainProgress = (completed / totalRounds.toFloat()).coerceIn(0f, 1f),
-                    trainDetail = "Round ${roundIndex + 1}/$totalRounds: ${idx + 1}/${candles.size} candles",
-                    replay = replay.size(),
-                    updates = learner.updates,
-                    epsilon = learner.epsilon
-                )
-            }
+            // Cooperative cancellation: "Stop training" must take effect within a candle, not a round.
+            coroutineContext.ensureActive()
+            publishTrainingProgress(idx, candles.size, roundIndex, totalRounds, startedAtMs, actionCounts, idx == candles.lastIndex)
             stepNo++
             val frame = MarketFrame(c, context)
             val stateBefore = featureBuilder.build(frame, broker.position, stepNo) ?: continue
@@ -518,9 +646,7 @@ class RlEngine(
                     val r = broker.equity(frame) - prevEq
                     rewardSum += r
                     if (r > 0) positive++ else if (r < 0) negative++
-                    val t = Transition(ps, pa, r, stateBefore, broker.validMask(), pendingDone)
-                    replay.add(t); appendTransition(t)
-                    if (replay.size() >= 64) learner.train(replay.sample(32))
+                    replay.add(Transition(ps, pa, r, stateBefore, broker.validMask(), pendingDone))
                 }
             }
             val actionIdx = learner.select(stateBefore, broker.validMask(), explore = true)
@@ -528,13 +654,18 @@ class RlEngine(
             val result = broker.step(Action.entries[actionIdx], frame, stepNo)
             lastEquity = result.equity
             val stateAfter = featureBuilder.patchPosition(stateBefore, broker.position, stepNo)
-            if (result.reason.startsWith("enter") || result.reason == "exit" || result.reason == "forced_exit_max_hold") {
+            if (isTradeReason(result.reason)) {
                 if (result.reason.startsWith("enter")) entries++ else exits++
                 rewardSum += result.reward
                 if (result.reward > 0) positive++ else if (result.reward < 0) negative++
-                val t = Transition(stateBefore, result.action.ordinal, result.reward, stateAfter, broker.validMask(), result.reason == "exit" || result.reason == "forced_exit_max_hold")
-                replay.add(t); appendTransition(t)
-                if (replay.size() >= 64) learner.train(replay.sample(32))
+                replay.add(Transition(stateBefore, result.action.ordinal, result.reward, stateAfter, broker.validMask(), isExitReason(result.reason)))
+            }
+            // Batched updates: training on every generated transition pinned the CPU and produced
+            // tens of thousands of gradient steps per round.
+            sinceTrain++
+            if (sinceTrain >= TRAIN_EVERY_CANDLES && replay.size() >= 64) {
+                learner.train(replay.sample(TRAIN_BATCH))
+                sinceTrain = 0
             }
             if (first && broker.position == null && result.reason == "wait_flat") {
                 pendingState = null; pendingAction = null; pendingDone = false
@@ -549,9 +680,49 @@ class RlEngine(
             if (dd < maxDrawdown) maxDrawdown = dd
         }
         val finalEq = candles.lastOrNull()?.let { broker.equity(MarketFrame(it, context)) } ?: 0.0
-        val actions = Action.entries.joinToString("/") { "${it.name.first()}=${actionCounts[it.ordinal]}" }
-        return "frames $frames trainEq ${"%+.2f".format(finalEq)} reward ${"%+.2f".format(rewardSum)} +$positive/-$negative trades $entries/$exits maxDD ${"%.2f".format(maxDrawdown)} actions $actions"
+        val actions = actionSummary(actionCounts)
+        return "frames $frames trainEq ${"%+.2f".format(finalEq)} reward ${"%+.2f".format(rewardSum)} " +
+            "+$positive/-$negative trades $entries/$exits maxDD ${"%.2f".format(maxDrawdown)} actions $actions"
     }
+
+    private fun actionSummary(counts: IntArray): String =
+        Action.entries.joinToString("/") { "${it.name.first()}=${counts[it.ordinal]}" }
+
+    /** Time-throttled progress publishing; per-candle StateFlow writes made the UI drop frames. */
+    private fun publishTrainingProgress(
+        idx: Int,
+        total: Int,
+        roundIndex: Int,
+        totalRounds: Int,
+        startedAtMs: Long,
+        actionCounts: IntArray,
+        force: Boolean
+    ) {
+        val now = System.currentTimeMillis()
+        if (!force && now - lastUiPublishMs < UI_THROTTLE_MS) return
+        lastUiPublishMs = now
+        val done = roundIndex.toFloat() + (idx + 1).toFloat() / total.toFloat()
+        val progress = (done / totalRounds.toFloat()).coerceIn(0f, 1f)
+        val elapsed = now - startedAtMs
+        val eta = if (progress > 0.01f) ((elapsed / progress) - elapsed).toLong().coerceAtLeast(0L) else 0L
+        _state.update {
+            it.copy(
+                trainProgress = progress,
+                trainDetail = "Round ${roundIndex + 1}/$totalRounds: ${idx + 1}/$total candles",
+                processedCandles = idx + 1,
+                totalCandles = total,
+                replay = replay.size(),
+                updates = learner.updates,
+                epsilon = learner.epsilon,
+                actionCounts = actionSummary(actionCounts),
+                elapsedMs = elapsed,
+                etaMs = eta
+            )
+        }
+    }
+
+    private fun isTradeReason(reason: String) = reason.startsWith("enter") || isExitReason(reason)
+    private fun isExitReason(reason: String) = reason == "exit" || reason == "forced_exit_max_hold"
 
     private fun savePolicyBestEffort() {
         try {
@@ -564,12 +735,35 @@ class RlEngine(
         } catch (_: Exception) { }
     }
 
+    /** Compact, readable record of an offline run; replaces persisting the raw transitions. */
+    private fun saveOfflineSummary(report: String, rounds: Int, candles: Int, startedAtMs: Long) {
+        try {
+            val target = summaryFile() ?: return
+            val json = JSONObject()
+                .put("coin", coin)
+                .put("interval", interval)
+                .put("candles", candles)
+                .put("rounds", rounds)
+                .put("report", report)
+                .put("updates", learner.updates)
+                .put("epsilon", learner.epsilon)
+                .put("replayInMemory", replay.size())
+                .put("elapsedMs", System.currentTimeMillis() - startedAtMs)
+                .put("finishedAtMillis", System.currentTimeMillis())
+            target.writeText(json.toString())
+        } catch (_: Exception) { }
+    }
+
     internal fun loadStoredCandles(): List<Candle> {
         val file = candleDataFile ?: return emptyList()
         if (!file.exists()) return emptyList()
-        return file.readLines().mapNotNull { line ->
-            if (line.isBlank()) null else try { candleFromJson(JSONObject(line)) } catch (_: Exception) { null }
-        }.sortedBy { it.openTimeMillis }
+        return try {
+            file.useLines { lines ->
+                lines.mapNotNull { line ->
+                    if (line.isBlank()) null else try { candleFromJson(JSONObject(line)) } catch (_: Exception) { null }
+                }.toList()
+            }.sortedBy { it.openTimeMillis }
+        } catch (_: Exception) { emptyList() }
     }
 
     private fun candleToJson(c: Candle): JSONObject = JSONObject()
@@ -588,27 +782,41 @@ class RlEngine(
     private fun candleKey(c: Candle): String = "${c.openTimeMillis}:${c.close}:${c.high}:${c.low}:${c.volume}:${c.trades}"
 
     private fun appendTransition(t: Transition) {
-        // Offline epochs generate rounds x candles transitions of ~9 KB each. Appending every one of
-        // them would write hundreds of MB per training run, so offline rounds are checkpointed by
-        // compacting the bounded in-memory buffer once per round instead.
+        // Offline epochs generate rounds x candles transitions of ~9 KB each; persisting them wrote
+        // >150 MB per market per run. Offline training keeps its replay in memory and persists only
+        // the policy plus a compact summary.
         if (offlineMode) return
-        try { replayAppendFile?.appendText(t.toJsonLine() + "\n") }
-        catch (_: Exception) { _state.value = _state.value.copy(status = "replay append failed") }
+        try {
+            val file = replayAppendFile ?: return
+            file.appendText(t.toJsonLine() + "\n")
+            // Self-bound the live log from the engine's own background coroutine, so stopping the
+            // service never has to compact a multi-MB file on the main thread.
+            if (++appendsSinceSizeCheck >= APPEND_SIZE_CHECK_EVERY) {
+                appendsSinceSizeCheck = 0
+                if (file.length() > REPLAY_FILE_MAX_BYTES) compactReplayFile()
+            }
+        } catch (_: Exception) { _state.update { it.copy(status = "replay append failed") } }
     }
 
-    private fun loadReplayOnce() {
+    internal fun loadReplayOnce() {
         if (loadedReplay) return
         loadedReplay = true
         val file = replayAppendFile ?: return
         if (!file.exists()) return
         try {
+            if (file.length() > REPLAY_FILE_MAX_BYTES) {
+                // Never parse an oversized replay log; archive it and start the buffer clean.
+                archive(file)
+                _state.update { it.copy(status = "oversized replay archived; starting clean") }
+                return
+            }
             var kept = 0
             var skipped = 0
-            val tail = ArrayDeque<String>(20_000)
+            val tail = ArrayDeque<String>(PERSISTED_REPLAY_ROWS)
             file.useLines { lines ->
                 lines.forEach { line ->
                     if (line.isNotBlank()) {
-                        if (tail.size == 20_000) tail.removeFirst()
+                        if (tail.size == PERSISTED_REPLAY_ROWS) tail.removeFirst()
                         tail.addLast(line)
                     }
                 }
@@ -622,9 +830,23 @@ class RlEngine(
                     skipped++
                 }
             }
-            _state.value = _state.value.copy(replay = replay.size(), status = "replay restored: $kept${if (skipped > 0) ", skipped $skipped old rows" else ""}")
+            _state.update {
+                it.copy(replay = replay.size(), status = "replay restored: $kept${if (skipped > 0) ", skipped $skipped old rows" else ""}")
+            }
         } catch (_: Exception) {
-            _state.value = _state.value.copy(status = "replay restore failed")
+            _state.update { it.copy(status = "replay restore failed") }
         }
+    }
+
+    companion object {
+        /** In-memory transitions. 5k rows of ~1.9 KB is ~10 MB; 20k used to dominate the app heap. */
+        const val REPLAY_CAPACITY = 5_000
+        /** Rows kept on disk for live learning. Rows are ~9 KB, so this caps the file near 18 MB. */
+        const val PERSISTED_REPLAY_ROWS = 2_000
+        const val REPLAY_FILE_MAX_BYTES = 25_000_000L
+        private const val UI_THROTTLE_MS = 250L
+        private const val TRAIN_EVERY_CANDLES = 8
+        private const val TRAIN_BATCH = 32
+        private const val APPEND_SIZE_CHECK_EVERY = 500
     }
 }

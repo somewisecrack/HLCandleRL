@@ -43,7 +43,7 @@ class RlForegroundService : Service() {
     override fun onBind(intent: Intent?): IBinder? = null
 
     override fun onDestroy() {
-        if (!skipSaveOnDestroy) saveLearningState(compactReplay = true)
+        if (!skipSaveOnDestroy) saveLearningStateBlocking(compactReplay = false)
         notificationJob?.cancel()
         scope.cancel()
         engine.stop()
@@ -53,7 +53,9 @@ class RlForegroundService : Service() {
     private fun startLearner() {
         engine.attachPersistenceDir(filesDir.resolve("learning_state"))
         startForeground(NOTIFICATION_ID, buildNotification("Starting", "Restoring policy + replay…"))
-        loadPolicy()
+        // Policy/replay restore happens inside engine.start() on Dispatchers.IO. Reading them here
+        // would put a multi-MB parse on the service main thread before the learner even runs.
+        migrateLegacyPolicy()
         engine.start()
         notificationJob?.cancel()
         notificationJob = scope.launch {
@@ -82,7 +84,7 @@ class RlForegroundService : Service() {
     }
 
     private fun stopLearner() {
-        saveLearningState(compactReplay = true)
+        saveLearningStateBlocking(compactReplay = false)
         notificationJob?.cancel()
         engine.stop()
         stopForeground(STOP_FOREGROUND_REMOVE)
@@ -90,6 +92,12 @@ class RlForegroundService : Service() {
     }
 
     private fun saveLearningState(compactReplay: Boolean) {
+        // Callers are on the service main thread; writing the policy and compacting replay are disk
+        // operations and must not block it.
+        scope.launch(Dispatchers.IO) { saveLearningStateBlocking(compactReplay) }
+    }
+
+    private fun saveLearningStateBlocking(compactReplay: Boolean) {
         try {
             val target = engine.policyFile() ?: return
             val parent = target.parentFile ?: return
@@ -100,6 +108,8 @@ class RlForegroundService : Service() {
                 target.delete()
                 tmp.renameTo(target)
             }
+            // Replay file size is bounded by the engine itself while appending; the service only
+            // needs to checkpoint the small policy file.
             if (compactReplay) engine.compactReplayFile()
             lastSavedUpdates = engine.state.value.updates
         } catch (_: Exception) {
@@ -107,15 +117,20 @@ class RlForegroundService : Service() {
         }
     }
 
-    private fun loadPolicy() {
-        val policyFile = engine.policyFile() ?: return
-        val legacyJson = getSharedPreferences(PREFS, MODE_PRIVATE).getString(KEY_POLICY_JSON, null)
-        val json = when {
-            policyFile.exists() -> policyFile.readText()
-            legacyJson != null -> legacyJson
-            else -> null
-        } ?: return
-        try { engine.importPolicyJson(json) } catch (_: Exception) { }
+    /** One-time move of a pre-file-storage policy out of SharedPreferences, off the main thread. */
+    private fun migrateLegacyPolicy() {
+        val prefs = getSharedPreferences(PREFS, MODE_PRIVATE)
+        val legacyJson = prefs.getString(KEY_POLICY_JSON, null) ?: return
+        scope.launch(Dispatchers.IO) {
+            try {
+                val target = engine.policyFile() ?: return@launch
+                if (!target.exists()) {
+                    target.parentFile?.mkdirs()
+                    target.writeText(legacyJson)
+                }
+                prefs.edit().remove(KEY_POLICY_JSON).apply()
+            } catch (_: Exception) { }
+        }
     }
 
     private fun createChannel() {

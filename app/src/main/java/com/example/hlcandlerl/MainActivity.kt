@@ -62,8 +62,9 @@ class MainActivity : ComponentActivity() {
                     onStop = { stopLearnerService() },
                     onReset = { resetLearnerService() },
                     onMarketChange = { e.setMarket(it) },
-                    onDownload = { e.downloadOfflineCandles(days = 7) },
-                    onOfflineTrain = { e.offlineTrain(rounds = 5) },
+                    onDownload = { days -> e.downloadOfflineCandles(days = days) },
+                    onOfflineTrain = { rounds -> e.offlineTrain(rounds = rounds) },
+                    onStopTraining = { e.stopOfflineTraining() },
                     onDeleteData = { e.deleteDownloadedData() }
                 )
             }
@@ -91,8 +92,9 @@ private fun Dashboard(
     onStop: () -> Unit,
     onReset: () -> Unit,
     onMarketChange: (String) -> Unit,
-    onDownload: () -> Unit,
-    onOfflineTrain: () -> Unit,
+    onDownload: (Int) -> Unit,
+    onOfflineTrain: (Int) -> Unit,
+    onStopTraining: () -> Unit,
     onDeleteData: () -> Unit
 ) {
     val pnlColor = when {
@@ -169,13 +171,31 @@ private fun Dashboard(
                 BodyText("Download candles once, train multiple rounds locally on the phone, or delete downloaded data to free storage.")
                 Spacer(Modifier.height(8.dp))
                 val offlineBusy = state.downloadActive || state.trainActive
+                val canAct = !state.running && !offlineBusy
                 Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    OutlinedButton(onClick = onDownload, enabled = !state.running && !offlineBusy, modifier = Modifier.weight(1f), shape = RoundedCornerShape(14.dp)) { Text("Download 7d") }
-                    Button(onClick = onOfflineTrain, enabled = !state.running && !offlineBusy, modifier = Modifier.weight(1f), shape = RoundedCornerShape(14.dp)) { Text("Offline train") }
+                    listOf(1, 3, 7).forEach { days ->
+                        OutlinedButton(
+                            onClick = { onDownload(days) },
+                            enabled = canAct,
+                            modifier = Modifier.weight(1f),
+                            shape = RoundedCornerShape(14.dp)
+                        ) { Text("Download ${days}d") }
+                    }
+                }
+                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Button(onClick = { onOfflineTrain(1) }, enabled = canAct, modifier = Modifier.weight(1f), shape = RoundedCornerShape(14.dp)) { Text("Train 1 round") }
+                    Button(onClick = { onOfflineTrain(3) }, enabled = canAct, modifier = Modifier.weight(1f), shape = RoundedCornerShape(14.dp)) { Text("Train 3 rounds") }
                 }
                 OutlinedButton(
+                    onClick = onStopTraining,
+                    enabled = state.trainActive,
+                    modifier = Modifier.fillMaxWidth(),
+                    shape = RoundedCornerShape(14.dp),
+                    colors = ButtonDefaults.outlinedButtonColors(contentColor = Amber)
+                ) { Text("Stop offline training") }
+                OutlinedButton(
                     onClick = onDeleteData,
-                    enabled = !state.running && !offlineBusy,
+                    enabled = canAct,
                     modifier = Modifier.fillMaxWidth(),
                     shape = RoundedCornerShape(14.dp),
                     colors = ButtonDefaults.outlinedButtonColors(contentColor = Amber)
@@ -197,7 +217,12 @@ private fun Dashboard(
                 MetricGrid(
                     listOf(
                         "Stored candles" to state.offlineCandles.toString(),
-                        "Offline round" to state.offlineRound.toString(),
+                        "Storage" to formatBytes(state.storageBytes),
+                        "Phase" to state.phase,
+                        "Round" to if (state.offlineRounds > 0) "${state.offlineRound}/${state.offlineRounds}" else "—",
+                        "Candles done" to if (state.totalCandles > 0) "${state.processedCandles}/${state.totalCandles}" else "—",
+                        "Elapsed / ETA" to "${formatDuration(state.elapsedMs)} / ${formatDuration(state.etaMs)}",
+                        "Actions" to state.actionCounts.ifBlank { "—" },
                         "Report" to state.offlineReport.ifBlank { "—" }
                     )
                 )
@@ -242,6 +267,18 @@ private fun Dashboard(
     }
 }
 
+private fun formatBytes(bytes: Long): String = when {
+    bytes <= 0L -> "0 MB"
+    bytes < 1_000_000L -> "%.1f KB".format(bytes / 1_000.0)
+    else -> "%.1f MB".format(bytes / 1_000_000.0)
+}
+
+private fun formatDuration(ms: Long): String = when {
+    ms <= 0L -> "0s"
+    ms < 60_000L -> "${ms / 1000}s"
+    else -> "${ms / 60_000}m ${(ms % 60_000) / 1000}s"
+}
+
 @Composable
 private fun Header(running: Boolean, status: String, onStart: () -> Unit, onStop: () -> Unit, onReset: () -> Unit) {
     Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
@@ -283,6 +320,9 @@ private fun MarketSelector(selected: String, markets: List<String>, enabled: Boo
         OutlinedButton(onClick = { expanded = true }, enabled = enabled, modifier = Modifier.fillMaxWidth(), shape = RoundedCornerShape(14.dp)) {
             Text(if (enabled) "Market: $selected" else "Market: $selected — busy")
         }
+        // Note: DropdownMenu measures its content's intrinsics, so a LazyColumn cannot be nested
+        // here (it throws "Asking for intrinsic measurements of SubcomposeLayout"). The curated
+        // market list is small enough to compose eagerly.
         DropdownMenu(expanded = expanded, onDismissRequest = { expanded = false }) {
             markets.forEach { label ->
                 DropdownMenuItem(text = { Text(label) }, onClick = {
