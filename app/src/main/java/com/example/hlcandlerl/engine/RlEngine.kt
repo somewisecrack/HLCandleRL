@@ -114,6 +114,7 @@ class RlEngine(
         val newCoin = markets[label] ?: return
         _state.update { it.copy(status = "switching to $label", marketSwitching = true) }
         scope.launch {
+            try {
             marketLabel = label
             coin = newCoin
             // Switching stays off the disk entirely. The persisted replay is only restored when the
@@ -136,6 +137,11 @@ class RlEngine(
                 )
             }
             publishStorageStats()
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                _state.update { it.copy(status = "market switch failed: ${e.javaClass.simpleName}", marketSwitching = false) }
+            }
         }
     }
 
@@ -518,8 +524,23 @@ class RlEngine(
                 },
                 onStatus = { s -> _state.update { st -> st.copy(status = s) } }
             ).also { it.connect() }
+            var consecutiveFailures = 0
             while (isActive) {
-                tick()
+                // An exception escaping a coroutine launched on this scope would reach the default
+                // handler and kill the process. A decision step must never do that.
+                try {
+                    tick()
+                    consecutiveFailures = 0
+                } catch (e: CancellationException) {
+                    throw e
+                } catch (e: Exception) {
+                    consecutiveFailures++
+                    _state.update { it.copy(status = "decision step failed: ${e.javaClass.simpleName} (x$consecutiveFailures)") }
+                    if (consecutiveFailures >= MAX_CONSECUTIVE_TICK_FAILURES) {
+                        _state.update { it.copy(status = "learner stopped after repeated errors", phase = "idle", running = false) }
+                        break
+                    }
+                }
                 delay(1000)
             }
         }
@@ -848,5 +869,6 @@ class RlEngine(
         private const val TRAIN_EVERY_CANDLES = 8
         private const val TRAIN_BATCH = 32
         private const val APPEND_SIZE_CHECK_EVERY = 500
+        private const val MAX_CONSECUTIVE_TICK_FAILURES = 5
     }
 }

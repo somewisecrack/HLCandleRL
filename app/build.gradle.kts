@@ -5,7 +5,8 @@ plugins {
 
 android {
     namespace = "com.example.hlcandlerl"
-    compileSdk = 35
+    // 36 so Service.onTimeout(startId, fgsType) can be overridden; targetSdk stays 35.
+    compileSdk = 36
 
     defaultConfig {
         applicationId = "com.example.hlcandlerl"

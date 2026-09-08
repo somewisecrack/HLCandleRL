@@ -26,18 +26,36 @@ class RlForegroundService : Service() {
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        when (intent?.action) {
-            ACTION_STOP -> {
-                stopLearner()
-                return START_NOT_STICKY
-            }
-            ACTION_RESET -> {
-                resetLearner()
-                return START_NOT_STICKY
-            }
+        if (intent == null) {
+            // A sticky restart re-delivers a null intent while the app is in the background. Calling
+            // startForeground() from there throws ForegroundServiceStartNotAllowedException on
+            // Android 12+, so the learner is never silently resurrected; the user restarts it.
+            stopSelf()
+            return START_NOT_STICKY
+        }
+        when (intent.action) {
+            ACTION_STOP -> stopLearner()
+            ACTION_RESET -> resetLearner()
             else -> startLearner()
         }
-        return START_STICKY
+        return START_NOT_STICKY
+    }
+
+    /**
+     * Android 15+ times out long-running dataSync foreground services. If the service does not stop
+     * itself when told, the platform crashes the app, so a timeout is treated as a clean stop.
+     */
+    override fun onTimeout(startId: Int) {
+        handleForegroundTimeout()
+    }
+
+    override fun onTimeout(startId: Int, fgsType: Int) {
+        handleForegroundTimeout()
+    }
+
+    private fun handleForegroundTimeout() {
+        engine.stop()
+        stopLearner()
     }
 
     override fun onBind(intent: Intent?): IBinder? = null
@@ -52,7 +70,14 @@ class RlForegroundService : Service() {
 
     private fun startLearner() {
         engine.attachPersistenceDir(filesDir.resolve("learning_state"))
-        startForeground(NOTIFICATION_ID, buildNotification("Starting", "Restoring policy + replay…"))
+        try {
+            startForeground(NOTIFICATION_ID, buildNotification("Starting", "Restoring policy + replay…"))
+        } catch (e: Exception) {
+            // Foreground start can be refused (background start restrictions, missing notification
+            // permission). Refusing to run is correct; crashing the app is not.
+            stopSelf()
+            return
+        }
         // Policy/replay restore happens inside engine.start() on Dispatchers.IO. Reading them here
         // would put a multi-MB parse on the service main thread before the learner even runs.
         migrateLegacyPolicy()
@@ -60,6 +85,7 @@ class RlForegroundService : Service() {
         notificationJob?.cancel()
         notificationJob = scope.launch {
             engine.state.collect { s ->
+              try {
                 // Policy is checkpointed every 100 learner updates. Replay is appended immediately
                 // by RlEngine on every transition and compacted every 500 updates / clean stop.
                 if (s.updates > 0 && s.updates / 100 > lastSavedUpdates / 100) {
@@ -69,6 +95,11 @@ class RlForegroundService : Service() {
                 val text = "${s.coin} • PnL ${"%+.4f".format(s.equity)} • ${s.action} • replay ${s.replay}"
                 val nm = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
                 nm.notify(NOTIFICATION_ID, buildNotification(title, text))
+              } catch (e: CancellationException) {
+                  throw e
+              } catch (_: Exception) {
+                  // A failed notification refresh must never take the learner down with it.
+              }
             }
         }
     }
