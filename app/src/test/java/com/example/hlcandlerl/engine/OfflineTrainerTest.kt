@@ -280,6 +280,49 @@ class OfflineTrainerTest {
     }
 
     @Test
+    fun everyActionIsAcceptedAgainAfterACancelledRun() {
+        val root = tmp.newFolder()
+        writeCandles(root, "BTC", syntheticSeries(60_000))
+        writeCandles(root, "xyz_NVDA", syntheticSeries(60, base = 180.0, coin = "xyz:NVDA"))
+        val engine = engineWith(root)
+        engine.offlineTrain(rounds = 20)
+        runBlocking { withTimeout(30_000) { while (!engine.state.value.trainActive) delay(10) } }
+        engine.stopOfflineTraining()
+        runBlocking { withTimeout(10_000) { while (engine.state.value.trainActive) delay(10) } }
+
+        // A stale job handle used to make all of these silent no-ops for the rest of the process.
+        engine.setMarket("NVDA")
+        runBlocking { withTimeout(20_000) { while (engine.state.value.marketSwitching) delay(5) } }
+        assertEquals("xyz:NVDA", engine.state.value.coin)
+
+        engine.deleteDownloadedData()
+        assertTrue(engine.state.value.status.contains("deleted"))
+
+        engine.setMarket("BTC")
+        runBlocking { withTimeout(20_000) { while (engine.state.value.marketSwitching) delay(5) } }
+        engine.offlineTrain(rounds = 1)
+        runBlocking { withTimeout(20_000) { while (!engine.state.value.trainActive) delay(10) } }
+        engine.stopOfflineTraining()
+        runBlocking { withTimeout(10_000) { while (engine.state.value.trainActive) delay(10) } }
+    }
+
+    @Test
+    fun aRefusedDeleteDoesNotLeaveTheEngineWedged() {
+        val root = tmp.newFolder()
+        writeCandles(root, "BTC", syntheticSeries(60_000))
+        val engine = engineWith(root)
+        engine.offlineTrain(rounds = 20)
+        runBlocking { withTimeout(30_000) { while (!engine.state.value.trainActive) delay(10) } }
+        engine.deleteDownloadedData()
+        engine.setMarket("NVDA") // must be ignored while training, not queued or wedging
+        assertEquals("BTC", engine.state.value.coin)
+        engine.stopOfflineTraining()
+        runBlocking { withTimeout(10_000) { while (engine.state.value.trainActive) delay(10) } }
+        engine.deleteDownloadedData()
+        assertFalse(File(root, "BTC/candles_1m.jsonl").exists())
+    }
+
+    @Test
     fun deletingDownloadedDataIsRefusedWhileTrainingIsActive() {
         val root = tmp.newFolder()
         writeCandles(root, "BTC", syntheticSeries(60_000))

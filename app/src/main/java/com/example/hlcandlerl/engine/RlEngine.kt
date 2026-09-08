@@ -77,14 +77,14 @@ class RlEngine(
     private val learner = MaskedDoubleQLearner(inputDim = featureBuilder.featureSize)
     private val replay = ReplayBuffer(capacity = REPLAY_CAPACITY)
     private var ws: HyperLiquidCandleWsClient? = null
-    private var latestCandle: Candle? = null
+    @Volatile private var latestCandle: Candle? = null
     private var context: PerpContext = PerpContext()
     private var lastEquity: Double? = null
     private var pendingState: FloatArray? = null
     private var pendingAction: Int? = null
     private var pendingDone: Boolean = false
     private var lastDecisionFrameKey: String = ""
-    private var lastSeenFrameKey: String = ""
+    @Volatile private var lastSeenFrameKey: String = ""
     private var stepNo: Long = 0
     private var persistenceDir: File? = null
     private var replayAppendFile: File? = null
@@ -92,8 +92,8 @@ class RlEngine(
     private var loadedReplay = false
     private var persistenceRoot: File? = null
     private var offlineMode: Boolean = false
-    private var candleUpdates: Long = 0L
-    private var lastCandleWallMillis: Long = 0L
+    @Volatile private var candleUpdates: Long = 0L
+    @Volatile private var lastCandleWallMillis: Long = 0L
     private var lastUiPublishMs: Long = 0L
     private var appendsSinceSizeCheck: Int = 0
 
@@ -145,8 +145,16 @@ class RlEngine(
         }
     }
 
+    /**
+     * Guard for every user action. It asks whether a job is still *running*, not merely whether a
+     * handle was left behind: a completed-but-unnulled handle used to make Start, Download, Train,
+     * Delete and market switching permanent no-ops with no way back except killing the app.
+     */
     private fun busy(): Boolean =
-        _state.value.running || decisionJob != null || offlineJob != null || _state.value.marketSwitching
+        _state.value.running ||
+            decisionJob?.isActive == true ||
+            offlineJob?.isActive == true ||
+            _state.value.marketSwitching
 
     private fun configureMarketPersistence() {
         val root = persistenceRoot ?: return
@@ -508,7 +516,7 @@ class RlEngine(
             clearRuntime(clearContext = false)
             featureBuilder.seed(history)
             _state.update { it.copy(status = "starting", phase = "live", running = true) }
-            ws = HyperLiquidCandleWsClient(
+            val socket = HyperLiquidCandleWsClient(
                 coin = coin,
                 interval = interval,
                 onCandle = {
@@ -523,9 +531,29 @@ class RlEngine(
                     }
                 },
                 onStatus = { s -> _state.update { st -> st.copy(status = s) } }
-            ).also { it.connect() }
+            )
+            // The socket is created after the last suspension point, so a job cancelled during the
+            // context/history load could previously open one and then exit the loop without closing
+            // it. An orphan reconnects forever on its own thread. Tie its lifetime to this job.
+            ws?.close()
+            ws = socket
+            try {
+                if (!isActive) return@launch
+                socket.connect()
+                runDecisionLoop()
+            } finally {
+                socket.close()
+                if (ws === socket) ws = null
+                // The loop can end by itself after repeated failures, not only via stop().
+                if (decisionJob === coroutineContext[Job]) decisionJob = null
+                _state.update { if (it.running) it.copy(running = false, phase = "idle") else it }
+            }
+        }
+    }
+
+    private suspend fun runDecisionLoop() {
             var consecutiveFailures = 0
-            while (isActive) {
+            while (coroutineContext.isActive) {
                 // An exception escaping a coroutine launched on this scope would reach the default
                 // handler and kill the process. A decision step must never do that.
                 try {
@@ -543,7 +571,6 @@ class RlEngine(
                 }
                 delay(1000)
             }
-        }
     }
 
     fun stop() {

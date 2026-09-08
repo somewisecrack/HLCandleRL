@@ -3,6 +3,8 @@ package com.example.hlcandlerl.exchange
 import com.example.hlcandlerl.data.Candle
 import okhttp3.*
 import org.json.JSONObject
+import java.util.concurrent.TimeUnit
+import kotlin.math.min
 
 class HyperLiquidCandleWsClient(
     private val coin: String,
@@ -10,19 +12,22 @@ class HyperLiquidCandleWsClient(
     private val onCandle: (Candle) -> Unit,
     private val onStatus: (String) -> Unit
 ) {
-    private val client = OkHttpClient.Builder().retryOnConnectionFailure(true).build()
     @Volatile private var ws: WebSocket? = null
     @Volatile private var closedByUser = false
+    @Volatile private var reconnectDelayMs = MIN_RECONNECT_MS
 
     fun connect() {
         closedByUser = false
+        reconnectDelayMs = MIN_RECONNECT_MS
         openSocket()
     }
 
     private fun openSocket() {
+        if (closedByUser) return
         val req = Request.Builder().url("wss://api.hyperliquid.xyz/ws").build()
-        ws = client.newWebSocket(req, object : WebSocketListener() {
+        ws = shared.newWebSocket(req, object : WebSocketListener() {
             override fun onOpen(webSocket: WebSocket, response: Response) {
+                reconnectDelayMs = MIN_RECONNECT_MS
                 onStatus("connected")
                 val sub = JSONObject()
                     .put("method", "subscribe")
@@ -31,32 +36,43 @@ class HyperLiquidCandleWsClient(
             }
 
             override fun onMessage(webSocket: WebSocket, text: String) {
+                if (closedByUser) return
                 parseCandle(text)?.let(onCandle)
             }
 
             override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
+                if (closedByUser) return
                 onStatus("ws failure: ${t.message}; reconnecting")
                 reconnectLater()
             }
 
             override fun onClosed(webSocket: WebSocket, code: Int, reason: String) {
+                if (closedByUser) return
                 onStatus("closed: $reason")
-                if (!closedByUser) reconnectLater()
+                reconnectLater()
             }
         })
     }
 
+    /**
+     * Exponential backoff, capped. A fixed 3 s retry meant a phone with no connectivity woke a new
+     * reconnect thread every three seconds for as long as the learner was running.
+     */
     private fun reconnectLater() {
         if (closedByUser) return
+        val delay = reconnectDelayMs
+        reconnectDelayMs = min(delay * 2, MAX_RECONNECT_MS)
         Thread {
-            try { Thread.sleep(3000) } catch (_: InterruptedException) { }
+            try { Thread.sleep(delay) } catch (_: InterruptedException) { }
             if (!closedByUser) openSocket()
-        }.start()
+        }.apply { isDaemon = true }.start()
     }
 
     fun close() {
         closedByUser = true
-        ws?.close(1000, "user closed")
+        try { ws?.close(1000, "user closed") } catch (_: Exception) { }
+        // cancel() also tears down a socket that never finished connecting, which close() leaves open.
+        try { ws?.cancel() } catch (_: Exception) { }
         ws = null
     }
 
@@ -82,5 +98,20 @@ class HyperLiquidCandleWsClient(
                 trades = d.optInt("n", 0)
             ).takeIf { it.open > 0.0 && it.high > 0.0 && it.low > 0.0 && it.close > 0.0 && it.high >= it.low }
         } catch (_: Exception) { null }
+    }
+
+    companion object {
+        private const val MIN_RECONNECT_MS = 3_000L
+        private const val MAX_RECONNECT_MS = 60_000L
+
+        /**
+         * One OkHttpClient for every socket this app opens. A client owns a dispatcher thread pool
+         * and a connection pool, so building one per learner start leaked both every time the user
+         * pressed Start.
+         */
+        internal val shared: OkHttpClient = OkHttpClient.Builder()
+            .retryOnConnectionFailure(true)
+            .pingInterval(20, TimeUnit.SECONDS)
+            .build()
     }
 }

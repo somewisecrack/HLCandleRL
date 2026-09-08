@@ -2,6 +2,7 @@ package com.example.hlcandlerl
 
 import android.Manifest
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.os.Build
 import android.os.Bundle
 import androidx.activity.ComponentActivity
@@ -39,7 +40,10 @@ class MainActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
+            checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED
+        ) {
+            // Only ask when it is actually missing; onCreate runs again on every configuration change.
             notificationPermission.launch(Manifest.permission.POST_NOTIFICATIONS)
         }
         setContent {
@@ -73,15 +77,28 @@ class MainActivity : ComponentActivity() {
 
     private fun startLearnerService() {
         val intent = Intent(this, RlForegroundService::class.java).setAction(RlForegroundService.ACTION_START)
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) startForegroundService(intent) else startService(intent)
+        sendToService(intent, foreground = true)
     }
 
     private fun stopLearnerService() {
-        startService(Intent(this, RlForegroundService::class.java).setAction(RlForegroundService.ACTION_STOP))
+        sendToService(Intent(this, RlForegroundService::class.java).setAction(RlForegroundService.ACTION_STOP), foreground = false)
     }
 
     private fun resetLearnerService() {
-        startService(Intent(this, RlForegroundService::class.java).setAction(RlForegroundService.ACTION_RESET))
+        sendToService(Intent(this, RlForegroundService::class.java).setAction(RlForegroundService.ACTION_RESET), foreground = false)
+    }
+
+    /**
+     * Starting a service is refused (with an exception) when the process is not in a state that
+     * allows it. A button press must never be able to crash the app.
+     */
+    private fun sendToService(intent: Intent, foreground: Boolean) {
+        try {
+            if (foreground && Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) startForegroundService(intent)
+            else startService(intent)
+        } catch (_: Exception) {
+            AppRuntime.engine.stop()
+        }
     }
 }
 
