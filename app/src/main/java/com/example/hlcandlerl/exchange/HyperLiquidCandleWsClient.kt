@@ -60,7 +60,7 @@ class HyperLiquidCandleWsClient(
         ws = null
     }
 
-    private fun parseCandle(text: String): Candle? {
+    internal fun parseCandle(text: String): Candle? {
         return try {
             val root = JSONObject(text)
             if (root.optString("channel") != "candle") return null

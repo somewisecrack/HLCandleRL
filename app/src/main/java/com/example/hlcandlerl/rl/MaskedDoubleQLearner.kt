@@ -47,8 +47,9 @@ data class Transition(
 }
 
 class ReplayBuffer(private val capacity: Int = 20_000, private val rng: Random = Random(7)) {
-    private val data = ArrayList<Transition>(capacity)
-    fun add(t: Transition) { if (data.size == capacity) data.removeAt(0); data.add(t) }
+    // ArrayDeque so evicting the oldest row stays O(1); an ArrayList shifted 20k rows on every add.
+    private val data = ArrayDeque<Transition>(capacity)
+    fun add(t: Transition) { if (data.size == capacity) data.removeFirst(); data.addLast(t) }
     fun addAll(items: Iterable<Transition>) { items.forEach { add(it) } }
     fun clear() { data.clear() }
     fun size() = data.size

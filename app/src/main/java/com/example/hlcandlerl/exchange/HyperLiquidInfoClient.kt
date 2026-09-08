@@ -9,16 +9,17 @@ import okhttp3.RequestBody.Companion.toRequestBody
 import org.json.JSONObject
 import java.util.concurrent.TimeUnit
 
-class HyperLiquidInfoClient {
+// Open + injectable so offline/engine tests can supply a deterministic fake instead of the network.
+open class HyperLiquidInfoClient {
     private val client = OkHttpClient.Builder()
         .connectTimeout(15, TimeUnit.SECONDS)
         .readTimeout(15, TimeUnit.SECONDS)
         .build()
     private val jsonType = "application/json".toMediaType()
 
-    fun loadContext(coin: String): PerpContext = loadPerpAsset(coin).context
+    open fun loadContext(coin: String): PerpContext = loadPerpAsset(coin).context
 
-    fun loadRecentCandles(coin: String, interval: String = "1m", lookbackMillis: Long = 3_600_000L): List<Candle> {
+    open fun loadRecentCandles(coin: String, interval: String = "1m", lookbackMillis: Long = 3_600_000L): List<Candle> {
         val now = System.currentTimeMillis()
         val payload = JSONObject()
             .put("type", "candleSnapshot")
@@ -33,7 +34,7 @@ class HyperLiquidInfoClient {
             .sortedBy { it.openTimeMillis }
     }
 
-    private fun parseCandle(d: JSONObject, coin: String, interval: String): Candle = Candle(
+    internal fun parseCandle(d: JSONObject, coin: String, interval: String): Candle = Candle(
         coin = d.optString("s", coin),
         interval = d.optString("i", interval),
         openTimeMillis = d.getLong("t"),
@@ -46,11 +47,19 @@ class HyperLiquidInfoClient {
         trades = d.optInt("n", 0)
     )
 
-    private fun loadPerpAsset(coin: String): AssetContext {
+    // Split out from the HTTP call so request shaping and response parsing stay unit-testable.
+    internal fun buildContextRequest(coin: String): JSONObject {
         val dex = coin.substringBefore(":", missingDelimiterValue = "")
         val metaReq = JSONObject().put("type", "metaAndAssetCtxs")
         if (dex.isNotBlank()) metaReq.put("dex", dex)
-        val arr = org.json.JSONArray(postText(metaReq))
+        return metaReq
+    }
+
+    private fun loadPerpAsset(coin: String): AssetContext =
+        AssetContext(parseContext(postText(buildContextRequest(coin)), coin))
+
+    internal fun parseContext(responseText: String, coin: String): PerpContext {
+        val arr = org.json.JSONArray(responseText)
         val meta = arr.getJSONObject(0)
         val ctxs = arr.getJSONArray(1)
         val universe = meta.getJSONArray("universe")
@@ -60,16 +69,14 @@ class HyperLiquidInfoClient {
             val name = asset.optString("name")
             if (name == coin || name == shortName) {
                 val ctx = ctxs.getJSONObject(i)
-                return AssetContext(
-                    context = PerpContext(
-                        openInterest = ctx.optString("openInterest", "0").toDouble(),
-                        markPx = ctx.optString("markPx", "0").toDouble(),
-                        oraclePx = ctx.optString("oraclePx", "0").toDouble(),
-                        premium = ctx.optString("premium", "0").toDouble(),
-                        dayNtlVlm = ctx.optString("dayNtlVlm", "0").toDouble(),
-                        dayBaseVlm = ctx.optString("dayBaseVlm", "0").toDouble(),
-                        source = "hyperliquid_info:metaAndAssetCtxs coin=$coin"
-                    )
+                return PerpContext(
+                    openInterest = ctx.optString("openInterest", "0").toDouble(),
+                    markPx = ctx.optString("markPx", "0").toDouble(),
+                    oraclePx = ctx.optString("oraclePx", "0").toDouble(),
+                    premium = ctx.optString("premium", "0").toDouble(),
+                    dayNtlVlm = ctx.optString("dayNtlVlm", "0").toDouble(),
+                    dayBaseVlm = ctx.optString("dayBaseVlm", "0").toDouble(),
+                    source = "hyperliquid_info:metaAndAssetCtxs coin=$coin"
                 )
             }
         }

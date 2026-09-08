@@ -9,6 +9,7 @@ import com.example.hlcandlerl.rl.*
 import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.update
 import org.json.JSONObject
 import java.io.File
 
@@ -53,7 +54,8 @@ import java.io.File
 
 class RlEngine(
     defaultMarketLabel: String = "BTC",
-    private val markets: Map<String, String> = mapOf("BTC" to "BTC")
+    private val markets: Map<String, String> = mapOf("BTC" to "BTC"),
+    private val infoClient: HyperLiquidInfoClient = HyperLiquidInfoClient()
 ) {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
     private var decisionJob: Job? = null
@@ -63,7 +65,6 @@ class RlEngine(
     private val interval = "1m"
     private val featureBuilder = OhlcvFeatureBuilder(window = 32)
     private val broker = VirtualPerpBroker()
-    private val infoClient = HyperLiquidInfoClient()
     private val learner = MaskedDoubleQLearner(inputDim = featureBuilder.featureSize)
     private val replay = ReplayBuffer()
     private var ws: HyperLiquidCandleWsClient? = null
@@ -82,6 +83,7 @@ class RlEngine(
     private var candleDataFile: File? = null
     private var loadedReplay = false
     private var persistenceRoot: File? = null
+    private var offlineMode: Boolean = false
     private var candleUpdates: Long = 0L
     private var lastCandleWallMillis: Long = 0L
 
@@ -117,6 +119,7 @@ class RlEngine(
                 epsilon = learner.epsilon,
                 marketSwitching = false
             )
+            publishStoredCandleCount()
         }
     }
 
@@ -126,6 +129,23 @@ class RlEngine(
         persistenceDir = File(root, safe).also { it.mkdirs() }
         replayAppendFile = File(persistenceDir, "replay.jsonl")
         candleDataFile = File(persistenceDir, "candles_${interval}.jsonl")
+        publishStoredCandleCount()
+    }
+
+    /** Reads the stored candle count off the main thread so a relaunch shows what is already downloaded. */
+    private fun publishStoredCandleCount() {
+        val file = candleDataFile ?: return
+        val coinAtRequest = coin
+        scope.launch(Dispatchers.IO) {
+            val count = try { if (file.exists()) file.useLines { it.count { line -> line.isNotBlank() } } else 0 } catch (_: Exception) { 0 }
+            // Atomic CAS update: a plain read-modify-write here can clobber a concurrent
+            // market-switch/reset state assignment and silently drop its fields.
+            _state.update { current ->
+                if (coinAtRequest == coin && !current.downloadActive && !current.trainActive) {
+                    current.copy(offlineCandles = count)
+                } else current
+            }
+        }
     }
 
     fun policyFile(): File? = persistenceDir?.let { File(it, "policy.json") }
@@ -147,7 +167,7 @@ class RlEngine(
                     downloadProgress = 0.75f,
                     downloadDetail = "Received ${candles.size} candles; writing phone storage..."
                 )
-                val file = candleDataFile ?: return@launch
+                val file = candleDataFile ?: error("no storage directory attached")
                 withContext(Dispatchers.IO) {
                     file.parentFile?.mkdirs()
                     file.writeText(candles.joinToString("\n", postfix = "\n") { candleToJson(it).toString() })
@@ -166,7 +186,10 @@ class RlEngine(
                     downloadProgress = 0f,
                     downloadDetail = "Download failed: ${e.message ?: e.javaClass.simpleName}"
                 )
-            } finally { offlineJob = null }
+            } finally {
+                _state.value = _state.value.copy(downloadActive = false)
+                offlineJob = null
+            }
         }
     }
 
@@ -213,32 +236,47 @@ class RlEngine(
             } catch (_: Exception) {
                 context = PerpContext()
             }
-            repeat(rounds) { idx ->
+            offlineMode = true
+            try {
+                repeat(rounds) { idx ->
+                    _state.value = _state.value.copy(
+                        status = "offline training round ${idx + 1}/$rounds",
+                        offlineCandles = candles.size,
+                        offlineRound = idx + 1,
+                        trainActive = true,
+                        trainProgress = idx.toFloat() / rounds.toFloat(),
+                        trainDetail = "Round ${idx + 1}/$rounds: 0/${candles.size} candles"
+                    )
+                    val report = runOfflineEpoch(candles, idx, rounds)
+                    _state.value = _state.value.copy(
+                        status = "offline round ${idx + 1}/$rounds complete",
+                        offlineCandles = candles.size,
+                        offlineRound = idx + 1,
+                        offlineReport = report,
+                        replay = replay.size(),
+                        updates = learner.updates,
+                        epsilon = learner.epsilon,
+                        trainActive = idx + 1 < rounds,
+                        trainProgress = (idx + 1).toFloat() / rounds.toFloat(),
+                        trainDetail = "Round ${idx + 1}/$rounds complete"
+                    )
+                    savePolicyBestEffort()
+                }
+                withContext(Dispatchers.IO) { compactReplayFile() }
+                _state.value = _state.value.copy(trainActive = false, trainProgress = 1f, trainDetail = "Offline training complete")
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
                 _state.value = _state.value.copy(
-                    status = "offline training round ${idx + 1}/$rounds",
-                    offlineCandles = candles.size,
-                    offlineRound = idx + 1,
-                    trainActive = true,
-                    trainProgress = idx.toFloat() / rounds.toFloat(),
-                    trainDetail = "Round ${idx + 1}/$rounds: 0/${candles.size} candles"
+                    status = "offline training failed: ${e.javaClass.simpleName}",
+                    trainActive = false,
+                    trainProgress = 0f,
+                    trainDetail = "Offline training failed: ${e.message ?: e.javaClass.simpleName}"
                 )
-                val report = runOfflineEpoch(candles, idx, rounds)
-                _state.value = _state.value.copy(
-                    status = "offline round ${idx + 1}/$rounds complete",
-                    offlineCandles = candles.size,
-                    offlineRound = idx + 1,
-                    offlineReport = report,
-                    replay = replay.size(),
-                    updates = learner.updates,
-                    epsilon = learner.epsilon,
-                    trainActive = idx + 1 < rounds,
-                    trainProgress = (idx + 1).toFloat() / rounds.toFloat(),
-                    trainDetail = "Round ${idx + 1}/$rounds complete"
-                )
-                savePolicyBestEffort()
+            } finally {
+                offlineMode = false
+                offlineJob = null
             }
-            _state.value = _state.value.copy(trainActive = false, trainProgress = 1f, trainDetail = "Offline training complete")
-            offlineJob = null
         }
     }
     fun importPolicyJson(json: String) {
@@ -271,6 +309,7 @@ class RlEngine(
             markets = markets,
             interval = interval
         )
+        publishStoredCandleCount()
     }
 
     private fun clearRuntime(clearContext: Boolean = true) {
@@ -293,7 +332,14 @@ class RlEngine(
         val file = replayAppendFile ?: return
         try {
             val tmp = File(file.parentFile, "replay.jsonl.tmp")
-            tmp.writeText(replay.snapshot().joinToString(separator = "\n", postfix = "\n") { it.toJsonLine() })
+            // Stream row by row: the buffer holds up to 20k transitions of ~9 KB, so building one
+            // joined String here allocates >100 MB and reliably throws OutOfMemoryError on a phone.
+            tmp.bufferedWriter().use { w ->
+                replay.snapshot().forEach { t ->
+                    w.write(t.toJsonLine())
+                    w.newLine()
+                }
+            }
             if (!tmp.renameTo(file)) {
                 file.delete()
                 tmp.renameTo(file)
@@ -518,7 +564,7 @@ class RlEngine(
         } catch (_: Exception) { }
     }
 
-    private fun loadStoredCandles(): List<Candle> {
+    internal fun loadStoredCandles(): List<Candle> {
         val file = candleDataFile ?: return emptyList()
         if (!file.exists()) return emptyList()
         return file.readLines().mapNotNull { line ->
@@ -542,6 +588,10 @@ class RlEngine(
     private fun candleKey(c: Candle): String = "${c.openTimeMillis}:${c.close}:${c.high}:${c.low}:${c.volume}:${c.trades}"
 
     private fun appendTransition(t: Transition) {
+        // Offline epochs generate rounds x candles transitions of ~9 KB each. Appending every one of
+        // them would write hundreds of MB per training run, so offline rounds are checkpointed by
+        // compacting the bounded in-memory buffer once per round instead.
+        if (offlineMode) return
         try { replayAppendFile?.appendText(t.toJsonLine() + "\n") }
         catch (_: Exception) { _state.value = _state.value.copy(status = "replay append failed") }
     }
