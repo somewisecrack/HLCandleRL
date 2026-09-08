@@ -35,7 +35,8 @@ Fixes committed on branch: `test/offline-training-robustness` (`5a4f235`)
   finished in ~12 s with `Saved 5222 candles`. **5222, not ~10080** — one `candleSnapshot` request
   does not return a full 7 days of 1m candles (known risk 5, now confirmed).
 - **Offline training: fail on the shipped build, fixed.** Tapping "Offline train" over those 5222
-  candles killed the app with `OutOfMemoryError` after the first round (see Bug 1). After the fix the
+  candles ran rounds 1-2 fast (~14 s for both, 5222 candles each) and then killed the app with
+  `OutOfMemoryError` on the round-2 replay checkpoint (see Bug 1). After the fix the
   suite covers it, but **the on-device re-run was not completed** — the session was stopped at the
   user's request before re-verifying training/delete/reset on the device.
 - **Delete downloaded data: not run on device** (unit-tested instead).
@@ -75,7 +76,8 @@ New JVM unit-test source set (none existed). **47 tests, 0 failures, green on 3 
 1. **Critical — OOM crash during offline training.** `RlEngine.compactReplayFile` built the entire
    replay buffer as one `joinToString` String. Rows are ~9.4 KB each (measured on device: 100 rows =
    960 KB), so a few thousand rows is a >90 MB allocation. Repro: download BTC 7d, tap Offline train
-   -> `java.lang.OutOfMemoryError ... at RlEngine.compactReplayFile` and the process dies. This is
+   -> rounds 1-2 complete in ~14 s, then `java.lang.OutOfMemoryError ... at
+   RlEngine.compactReplayFile` and the process dies. This is
    pre-existing code, also reachable from live Stop / the every-500-updates checkpoint once the
    buffer is large.
 2. **High — offline training could wedge the whole app.** `offlineTrain` set `offlineJob` and
