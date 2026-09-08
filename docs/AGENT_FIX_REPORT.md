@@ -1,8 +1,10 @@
 # HLCandleRL Fix Report
 
-Commit(s): `fa66f6b` (offline training) and `7daeec6` (service/live-loop hardening) on top of `8090ccf`
+Commit(s): `fa66f6b` (offline training), `7daeec6` (service/live-loop hardening) and `ab7e162`
+(socket/leak/wedge audit) on top of `8090ccf`
 Branch: `fix/offline-training-stability`
-Build/tests: **pass** — `./gradlew clean testDebugUnitTest assembleDebug --stacktrace`, 54 unit tests, 0 failures
+Build/tests: **pass** — `./gradlew clean testDebugUnitTest assembleDebug --stacktrace`, 56 unit tests,
+0 failures, green on three consecutive runs
 Device/emulator tested: **Medium_Phone_API_36.1 emulator, Android 16 / API 36.1, 1080x2400**, fresh
 install (package uninstalled first, so no carried-over app data). The attached physical Pixel 9 Pro
 stayed locked, so it was not driven.
@@ -168,6 +170,71 @@ home-and-resume during a training run, and a relaunch while the live learner was
 process never restarted, Stop always settled to PAUSED with Start re-enabled, and the crash buffer,
 FATAL, ANR and foreground-service checks were all empty.
 
+## Third pass: code audit, no device (`ab7e162`)
+
+Requested explicitly: stop exercising the emulator, read the code instead. Five defects were found by
+reading, in paths a manual run does not reliably reach. **These are verified by code review and unit
+tests, not by observing the failure on a device** — the socket-orphan path in particular needs a
+cancellation to land inside a specific window.
+
+**1. Orphaned websockets on Stop/Start — the best explanation for "gets slower and heats up".**
+`start()` constructed the `HyperLiquidCandleWsClient` *after* its last suspension point. Cancelling
+during the context/history load therefore did not prevent the socket being created: the job opened
+it, then `while (isActive)` exited immediately without closing it. The orphan still had
+`closedByUser = false`, so every failure or close scheduled another reconnect, forever, on its own
+thread — while the next Start ran a second socket beside it. Each Start/Stop cycle could leave
+another live socket behind. The socket's lifetime is now tied to the job:
+
+```kotlin
+ws?.close()
+ws = socket
+try {
+    if (!isActive) return@launch
+    socket.connect()
+    runDecisionLoop()
+} finally {
+    socket.close()
+    if (ws === socket) ws = null
+    if (decisionJob === coroutineContext[Job]) decisionJob = null
+    _state.update { if (it.running) it.copy(running = false, phase = "idle") else it }
+}
+```
+
+**2. An OkHttpClient leaked per learner start.** Every `HyperLiquidCandleWsClient` built its own
+`OkHttpClient`, and each one owns a dispatcher thread pool and a connection pool that were never shut
+down. All sockets now share a single client (`companion object { internal val shared }`), and
+`close()` also calls `cancel()` so a socket that never finished connecting is torn down too.
+
+**3. Unbounded reconnect churn.** Reconnects retried on a fixed 3 s timer with no cap, so a phone
+with no connectivity woke a new thread every three seconds for as long as the learner ran. Now
+exponential backoff from 3 s to a 60 s cap, reset on a successful open, on daemon threads.
+
+**4. A stale job handle wedged every button — the "hangs" symptom.** `busy()` tested
+`decisionJob != null`, not whether the job was still running. That was safe only while the live loop
+could exit exclusively via `stop()`; the failure-tolerance added in the second pass gave the loop its
+own exit path, after which a completed-but-unnulled handle would make Start, Download, Train, Delete
+**and** market switching permanent no-ops, with no recovery short of killing the app:
+
+```kotlin
+private fun busy(): Boolean =
+    _state.value.running ||
+        decisionJob?.isActive == true ||
+        offlineJob?.isActive == true ||
+        _state.value.marketSwitching
+```
+
+**5. Cross-thread candle fields.** `latestCandle`, `lastSeenFrameKey`, `candleUpdates` and
+`lastCandleWallMillis` are written on OkHttp callback threads and read by the decision loop on
+`Dispatchers.Default`, with no synchronisation. They are `@Volatile` now, so a stale read cannot
+stall decisions (visible as a candle age that keeps climbing while nothing happens).
+
+Also in this pass: `MainActivity` requests `POST_NOTIFICATIONS` only when it is actually missing
+(`onCreate` re-runs on every configuration change), and a refused `startService`/`startForegroundService`
+can no longer propagate out of a button press.
+
+Two tests were added for the wedge specifically — every action is accepted again after a cancelled
+run, and a refused delete leaves the engine usable.
+
 ## Remaining risks
 
 - One `candleSnapshot` request does not return the requested window: 7d yields ~5150 candles, 1d
@@ -185,6 +252,8 @@ FATAL, ANR and foreground-service checks were all empty.
   needs a different container (e.g. a modal bottom sheet with a lazy list).
 - The learner is no longer resurrected after a process death (`START_NOT_STICKY`); a long run that
   the system kills must be restarted by hand. That is deliberate — the alternative crashed.
+- The third-pass fixes are code-level: reviewed and unit-tested, but the failures they prevent were
+  never reproduced on a device, so their impact on the crashes you saw is inferred, not measured.
 - `AppRuntime.engine` remains a process-wide singleton shared by Activity and Service. All state
   writes are atomic now and attach is idempotent, but two components still drive one engine.
 
